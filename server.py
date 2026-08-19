@@ -1055,11 +1055,14 @@ _CUDA_ERROR_MARKS = ("cublas", "cudnn", "cuda", "dll", "gpu", "out of memory")
 
 def _enable_cuda_dll_dirs() -> None:
     """
-    把 pip 装的 nvidia cuBLAS/cuDNN DLL 目录加进 DLL 搜索路径。
+    把 pip 装的 nvidia cuBLAS/cuDNN DLL 目录同时加进 PATH 和 DLL 搜索目录。
 
-    Windows 上 Python 3.8+ 不再从 PATH 找扩展模块依赖的 DLL，必须显式
-    add_dll_directory，否则 ctranslate2 能认出显卡、却在第一次前向时报
-    "Library cublas64_12.dll is not found"。
+    ⚠️ 两个都要加，缺一不可：
+    - ctranslate2 是运行时用普通 LoadLibrary("cublas64_12.dll") 去找的，
+      这条路径只认 PATH，**不认** os.add_dll_directory 注册的目录；
+    - add_dll_directory 管的是 Python 扩展模块自身的依赖。
+    只加后者的话，现象是能认出显卡、模型也能加载，直到第一次前向才报
+    "Library cublas64_12.dll is not found or cannot be loaded"。
     """
     if os.name != "nt":
         return
@@ -1074,11 +1077,15 @@ def _enable_cuda_dll_dirs() -> None:
             continue
         for name in names:
             bin_dir = os.path.join(root, name, "bin")
-            if os.path.isdir(bin_dir):
-                try:
-                    os.add_dll_directory(bin_dir)
-                except OSError:
-                    pass
+            if not os.path.isdir(bin_dir):
+                continue
+            try:
+                os.add_dll_directory(bin_dir)
+            except OSError:
+                pass
+            path = os.environ.get("PATH", "")
+            if bin_dir not in path.split(os.pathsep):
+                os.environ["PATH"] = bin_dir + os.pathsep + path
 
 
 def _pick_device() -> tuple[str, str]:
@@ -1102,10 +1109,19 @@ def _pick_device() -> tuple[str, str]:
     return _DEVICE_CHOICE
 
 
-def _fall_back_to_cpu() -> None:
-    """GPU 半路挂了（缺 DLL、显存不够）时永久降级 CPU，并丢掉已加载的模型。"""
-    global _DEVICE_CHOICE
+_FALLBACK_REASON = ""
+
+
+def _fall_back_to_cpu(reason: str = "") -> None:
+    """
+    GPU 半路挂了（缺 DLL、显存不足）时永久降级 CPU，并丢掉已加载的模型。
+
+    ⚠️ 降级必须留痕。这里静默回落过一次，结果是「显示 GPU、实际全程 CPU」，
+    白白量了一轮假数据。原因记在 _FALLBACK_REASON 里，device_label() 会带出来。
+    """
+    global _DEVICE_CHOICE, _FALLBACK_REASON
     _DEVICE_CHOICE = ("cpu", "int8")
+    _FALLBACK_REASON = reason or "GPU 推理失败"
     _MODEL_CACHE.clear()
 
 
@@ -1124,10 +1140,40 @@ def _load_model(model_size: str):
     return model
 
 
+# GPU 上一条一条地贪心/beam 解码喂不饱卡（实测 4060 只有 27% 占用），
+# 用 BatchedInferencePipeline 把 VAD 切出来的片段成批送进去才吃得满。
+# CPU 上批处理没有意义，反而抢线程，所以只在 cuda 时启用。
+_GPU_BATCH_SIZE = 8
+
+
+def _decoder(model):
+    """返回 (可调用的 transcribe 对象, 额外 kwargs)。"""
+    if _pick_device()[0] != "cuda":
+        return model, {}
+    try:
+        from faster_whisper import BatchedInferencePipeline
+    except ImportError:
+        return model, {}
+    return BatchedInferencePipeline(model=model), {"batch_size": _GPU_BATCH_SIZE}
+
+
 def device_label() -> str:
-    """给界面显示的设备说明。"""
+    """给界面显示的设备说明；降级过就把原因带出来，别让人以为还在用 GPU。"""
     device, compute_type = _pick_device()
-    return "GPU (CUDA/float16)" if device == "cuda" else f"CPU ({compute_type})"
+    if device == "cuda":
+        return "GPU (CUDA/float16)"
+    if _FALLBACK_REASON:
+        return f"CPU ({compute_type}) — GPU 已降级：{_FALLBACK_REASON}"
+    return f"CPU ({compute_type})"
+
+
+def recommended_model() -> str:
+    """
+    有 GPU 就默认 medium：实测 4060 上 332 秒音频 11 秒转完（25x 实时），
+    比 CPU 跑 base 还快，而且「分水岭」「demo」「few-shot 示例」这些中文都对。
+    只有 CPU 时 medium 要 4 分钟，只能退回 base。
+    """
+    return "medium" if _pick_device()[0] == "cuda" else "base"
 
 # Whisper 的 initial_prompt 只吃约 224 个 token，术语表太长会被从头截掉，
 # 所以这里限一个长度，宁可少放几个也别把整段提示挤没。
@@ -1179,11 +1225,13 @@ def _transcribe_segments_sync(
     # initial_prompt 用简体中文并带上常见术语：Whisper 默认爱输出繁体，
     # 抖音语料后续要进 RAG/摘要，统一简体更省事。英文口播不受影响。
     def decode(active_model):
-        return active_model.transcribe(
+        runner, extra = _decoder(active_model)
+        return runner.transcribe(
             file_path,
             beam_size=5,
             vad_filter=True,
             initial_prompt=build_initial_prompt(terms),
+            **extra,
         )
 
     def collect(segments, info) -> str:
@@ -1206,7 +1254,7 @@ def _transcribe_segments_sync(
             raise
         if not any(mark in str(exc).lower() for mark in _CUDA_ERROR_MARKS):
             raise
-        _fall_back_to_cpu()
+        _fall_back_to_cpu(f"{type(exc).__name__}: {str(exc)[:80]}")
 
     return collect(*decode(_load_model(model_size)))
 

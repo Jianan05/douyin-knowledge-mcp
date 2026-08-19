@@ -37,9 +37,11 @@ from server import (
     save_transcript,
     DEFAULT_TERMS,
     device_label,
+    recommended_model,
 )
 
-WEB_DEFAULT_MODEL = "base"
+# 有 N 卡时默认 medium（GPU 上比 CPU 跑 base 还快），没卡时退回 base。
+WEB_DEFAULT_MODEL = recommended_model()
 
 
 def _format_error(exc: Exception) -> str:
@@ -472,10 +474,14 @@ with gr.Blocks(title="视频转文字 / Douyin & Bilibili to Text") as demo:
                         lines=3,
                     )
                     model_in = gr.Radio(
-                        choices=["tiny", "base", "small", "medium"],
+                        choices=["tiny", "base", "small", "medium", "large-v3"],
                         value=WEB_DEFAULT_MODEL,
                         label="Whisper 模型",
-                        info="tiny 最快易错 · base 默认均衡 · small 更准更慢 · medium 最准但长视频很慢。中文成语/数字听错要靠调大模型，英文术语听错请用下面的术语表。",
+                        info=(
+                            "中文成语/数字听错靠调大模型，英文术语听错靠下面的术语表，两者互不替代。"
+                            "有 GPU 时 medium 只要约 11 秒/5 分钟音频；只有 CPU 时 medium 要 4 分钟，建议 base。"
+                            "large-v3 首次使用会下载约 3GB。"
+                        ),
                     )
                     terms_in = gr.Textbox(
                         label="专业术语（可选，逗号分隔）",
