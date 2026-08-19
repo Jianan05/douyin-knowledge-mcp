@@ -1067,10 +1067,19 @@ def _transcribe_segments_sync(
     model = WhisperModel(model_size, device="cpu", compute_type="int8")
     # initial_prompt 用简体中文示例：Whisper 默认常输出繁体，抖音语料后续要进
     # RAG/摘要，统一成简体更省事。英文口播不受影响（语言仍然自动识别）。
+    # beam_size=5 + VAD：实测同一条 5.5 分钟音频，base 从 25s 涨到 47s，
+    # 但「面试观→面试官」「调做工具→调错工具」这类错一批一批地掉，很划算。
+    # VAD 还能跳过静音段，顺带压掉 Whisper 在无声处的幻觉重复。
+    # initial_prompt 用简体中文并带上常见术语：Whisper 默认爱输出繁体，
+    # 抖音语料后续要进 RAG/摘要，统一简体更省事。英文口播不受影响。
     segments, info = model.transcribe(
         file_path,
-        beam_size=1,
-        initial_prompt="以下是普通话的句子，请用简体中文转写。",
+        beam_size=5,
+        vad_filter=True,
+        initial_prompt=(
+            "以下是普通话的句子，请用简体中文转写。"
+            "内容可能涉及大模型、Agent、工具调用、few-shot、RAG、微调、prompt 等术语。"
+        ),
     )
     total = float(getattr(info, "duration", 0.0) or 0.0)
 
