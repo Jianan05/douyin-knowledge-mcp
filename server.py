@@ -1043,10 +1043,34 @@ def _download_sync(
 
 # ── 转录（faster-whisper，beam_size=1 加速）──────────────
 
+DEFAULT_TERMS = "Agent, few-shot, RAG, prompt, LLM, embedding, token, fine-tune"
+
+# Whisper 的 initial_prompt 只吃约 224 个 token，术语表太长会被从头截掉，
+# 所以这里限一个长度，宁可少放几个也别把整段提示挤没。
+_MAX_TERMS_CHARS = 300
+
+
+def build_initial_prompt(terms: str = "") -> str:
+    """
+    组装 initial_prompt。
+
+    英文专业名词（Agent / few-shot / RAG…）靠这里解决：实测同一条音频，
+    不给术语时 base 输出 "AZN"、"FiuShout"，给了之后直接变成 "Agent"、"few-shot"，
+    换更大的模型反而没有这一步管用。中文成语和数字错则是模型大小的问题，
+    prompt 修不了，只能上 small / medium。
+    """
+    prompt = "以下是普通话的句子，请用简体中文转写。"
+    terms = (terms or "").strip()
+    if terms:
+        prompt += f"内容可能涉及这些术语：{terms[:_MAX_TERMS_CHARS]}。"
+    return prompt
+
+
 def _transcribe_segments_sync(
     file_path: str,
     model_size: str = WHISPER_MODEL,
     on_segment=None,
+    terms: str = DEFAULT_TERMS,
 ) -> str:
     """
     用 faster-whisper 转录视频/音频文件，返回完整文字稿。
@@ -1076,10 +1100,7 @@ def _transcribe_segments_sync(
         file_path,
         beam_size=5,
         vad_filter=True,
-        initial_prompt=(
-            "以下是普通话的句子，请用简体中文转写。"
-            "内容可能涉及大模型、Agent、工具调用、few-shot、RAG、微调、prompt 等术语。"
-        ),
+        initial_prompt=build_initial_prompt(terms),
     )
     total = float(getattr(info, "duration", 0.0) or 0.0)
 
@@ -1093,9 +1114,11 @@ def _transcribe_segments_sync(
     return "\n".join(parts)
 
 
-def _transcribe_sync(file_path: str, model_size: str = WHISPER_MODEL) -> str:
+def _transcribe_sync(
+    file_path: str, model_size: str = WHISPER_MODEL, terms: str = DEFAULT_TERMS
+) -> str:
     """转录并返回完整文字稿（无进度回调，供 MCP 工具使用）。"""
-    return _transcribe_segments_sync(file_path, model_size)
+    return _transcribe_segments_sync(file_path, model_size, terms=terms)
 
 
 # ── 通用平台流程 ─────────────────────────────────────────

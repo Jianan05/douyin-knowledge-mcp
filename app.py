@@ -35,6 +35,7 @@ from server import (
     _TRANSCRIBE_EXECUTOR,
     capture_meta,
     save_transcript,
+    DEFAULT_TERMS,
 )
 
 WEB_DEFAULT_MODEL = "base"
@@ -138,7 +139,7 @@ def _stream_download(coro_factory):
 
 
 def transcribe(
-    url: str, model_size: str, progress=gr.Progress()
+    url: str, model_size: str, terms: str = DEFAULT_TERMS, progress=gr.Progress()
 ) -> Generator[tuple[str, str], None, None]:
     """
     返回 (transcript_text, status_message)，文字稿随转录进度流式更新。
@@ -190,7 +191,9 @@ def transcribe(
 
             def worker() -> None:
                 try:
-                    full = _transcribe_segments_sync(media_path, model_size, on_segment)
+                    full = _transcribe_segments_sync(
+                        media_path, model_size, on_segment, terms=terms
+                    )
                     q.put(("done", full))
                 except Exception as exc:  # noqa: BLE001 - 转发给主线程统一处理
                     q.put(("error", exc))
@@ -471,7 +474,13 @@ with gr.Blocks(title="视频转文字 / Douyin & Bilibili to Text") as demo:
                         choices=["tiny", "base", "small", "medium"],
                         value=WEB_DEFAULT_MODEL,
                         label="Whisper 模型",
-                        info="tiny 最快易错 · base 默认均衡 · small 更准更慢 · medium 最准但长视频很慢",
+                        info="tiny 最快易错 · base 默认均衡 · small 更准更慢 · medium 最准但长视频很慢。中文成语/数字听错要靠调大模型，英文术语听错请用下面的术语表。",
+                    )
+                    terms_in = gr.Textbox(
+                        label="专业术语（可选，逗号分隔）",
+                        value=DEFAULT_TERMS,
+                        lines=2,
+                        info="英文名词专用。不填时 Agent 可能被听成 AZN、few-shot 听成 FiuShout；填了就能对上。太长会被 Whisper 截断，只留最常出现的十来个。",
                     )
                     with gr.Row():
                         go_btn = gr.Button(
@@ -501,7 +510,7 @@ with gr.Blocks(title="视频转文字 / Douyin & Bilibili to Text") as demo:
 
         go_btn.click(
             fn=transcribe,
-            inputs=[url_in, model_in],
+            inputs=[url_in, model_in, terms_in],
             outputs=[text_out, status_out],
             show_progress_on=status_out,
         )
