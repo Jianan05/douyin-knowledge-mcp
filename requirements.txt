@@ -8,3 +8,9 @@ mcp>=1.0,<2
 
 # Web UI (app.py) — optional, only needed if you run the Gradio interface
 gradio>=6.14,<7
+
+# GPU 加速（可选，但有 N 卡就装）：ctranslate2 在 Windows 上找不到系统 CUDA 时，
+# 靠这两个 wheel 提供 cuBLAS/cuDNN；server.py 会自动把它们的 bin 目录加进 DLL 搜索路径。
+# 没有 N 卡时不用装，代码会自动回落到 CPU。
+nvidia-cublas-cu12
+nvidia-cudnn-cu12>=9,<10

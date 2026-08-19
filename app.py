@@ -36,6 +36,7 @@ from server import (
     capture_meta,
     save_transcript,
     DEFAULT_TERMS,
+    device_label,
 )
 
 WEB_DEFAULT_MODEL = "base"
@@ -499,7 +500,9 @@ with gr.Blocks(title="视频转文字 / Douyin & Bilibili to Text") as demo:
 
             with gr.Column(scale=4):
                 with gr.Group(elem_classes="soft-card"):
-                    status_out = gr.Markdown("准备就绪，粘贴链接后点击 **开始转录**。")
+                    status_out = gr.Markdown(
+                        f"准备就绪，粘贴链接后点击 **开始转录**。（转录设备：{device_label()}）"
+                    )
                     text_out = gr.Textbox(
                         label="文字稿（转录时会逐段实时显示）",
                         lines=22,

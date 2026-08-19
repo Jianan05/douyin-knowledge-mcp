@@ -1045,6 +1045,90 @@ def _download_sync(
 
 DEFAULT_TERMS = "Agent, few-shot, RAG, prompt, LLM, embedding, token, fine-tune"
 
+# ── 设备选择：有 N 卡就用 GPU，用不了就回落 CPU ─────────────
+
+# (device, compute_type)；None 表示还没探测过。
+_DEVICE_CHOICE: tuple[str, str] | None = None
+_MODEL_CACHE: dict[tuple, object] = {}
+_CUDA_ERROR_MARKS = ("cublas", "cudnn", "cuda", "dll", "gpu", "out of memory")
+
+
+def _enable_cuda_dll_dirs() -> None:
+    """
+    把 pip 装的 nvidia cuBLAS/cuDNN DLL 目录加进 DLL 搜索路径。
+
+    Windows 上 Python 3.8+ 不再从 PATH 找扩展模块依赖的 DLL，必须显式
+    add_dll_directory，否则 ctranslate2 能认出显卡、却在第一次前向时报
+    "Library cublas64_12.dll is not found"。
+    """
+    if os.name != "nt":
+        return
+    try:
+        import nvidia
+    except ImportError:
+        return
+    for root in nvidia.__path__:
+        try:
+            names = os.listdir(root)
+        except OSError:
+            continue
+        for name in names:
+            bin_dir = os.path.join(root, name, "bin")
+            if os.path.isdir(bin_dir):
+                try:
+                    os.add_dll_directory(bin_dir)
+                except OSError:
+                    pass
+
+
+def _pick_device() -> tuple[str, str]:
+    """返回 (device, compute_type)。设 WHISPER_DEVICE=cpu 可强制走 CPU。"""
+    global _DEVICE_CHOICE
+    if _DEVICE_CHOICE is not None:
+        return _DEVICE_CHOICE
+    if os.environ.get("WHISPER_DEVICE", "").lower() == "cpu":
+        _DEVICE_CHOICE = ("cpu", "int8")
+        return _DEVICE_CHOICE
+    try:
+        import ctranslate2
+
+        if ctranslate2.get_cuda_device_count() > 0:
+            _enable_cuda_dll_dirs()
+            _DEVICE_CHOICE = ("cuda", "float16")
+            return _DEVICE_CHOICE
+    except Exception:
+        pass
+    _DEVICE_CHOICE = ("cpu", "int8")
+    return _DEVICE_CHOICE
+
+
+def _fall_back_to_cpu() -> None:
+    """GPU 半路挂了（缺 DLL、显存不够）时永久降级 CPU，并丢掉已加载的模型。"""
+    global _DEVICE_CHOICE
+    _DEVICE_CHOICE = ("cpu", "int8")
+    _MODEL_CACHE.clear()
+
+
+def _load_model(model_size: str):
+    """加载并缓存模型。medium/large 加载要好几秒，缓存能省掉每次转录的重复开销。"""
+    from faster_whisper import WhisperModel
+
+    device, compute_type = _pick_device()
+    key = (model_size, device, compute_type)
+    model = _MODEL_CACHE.get(key)
+    if model is None:
+        # 只留一个：显存和内存都不宽裕，换模型时把上一个放掉。
+        _MODEL_CACHE.clear()
+        model = WhisperModel(model_size, device=device, compute_type=compute_type)
+        _MODEL_CACHE[key] = model
+    return model
+
+
+def device_label() -> str:
+    """给界面显示的设备说明。"""
+    device, compute_type = _pick_device()
+    return "GPU (CUDA/float16)" if device == "cuda" else f"CPU ({compute_type})"
+
 # Whisper 的 initial_prompt 只吃约 224 个 token，术语表太长会被从头截掉，
 # 所以这里限一个长度，宁可少放几个也别把整段提示挤没。
 _MAX_TERMS_CHARS = 300
@@ -1084,11 +1168,9 @@ def _transcribe_segments_sync(
         segments 是惰性生成器，遍历它本身就是在做转录，所以回调能给出
         随转录推进的增量进度。
     """
-    from faster_whisper import WhisperModel
-
     if model_size not in _ALLOWED_MODELS:
         model_size = WHISPER_MODEL
-    model = WhisperModel(model_size, device="cpu", compute_type="int8")
+    model = _load_model(model_size)
     # initial_prompt 用简体中文示例：Whisper 默认常输出繁体，抖音语料后续要进
     # RAG/摘要，统一成简体更省事。英文口播不受影响（语言仍然自动识别）。
     # beam_size=5 + VAD：实测同一条 5.5 分钟音频，base 从 25s 涨到 47s，
@@ -1096,22 +1178,37 @@ def _transcribe_segments_sync(
     # VAD 还能跳过静音段，顺带压掉 Whisper 在无声处的幻觉重复。
     # initial_prompt 用简体中文并带上常见术语：Whisper 默认爱输出繁体，
     # 抖音语料后续要进 RAG/摘要，统一简体更省事。英文口播不受影响。
-    segments, info = model.transcribe(
-        file_path,
-        beam_size=5,
-        vad_filter=True,
-        initial_prompt=build_initial_prompt(terms),
-    )
-    total = float(getattr(info, "duration", 0.0) or 0.0)
+    def decode(active_model):
+        return active_model.transcribe(
+            file_path,
+            beam_size=5,
+            vad_filter=True,
+            initial_prompt=build_initial_prompt(terms),
+        )
 
-    parts: list[str] = []
-    for seg in segments:
-        text = seg.text.strip()
-        if text:
-            parts.append(text)
-        if on_segment is not None:
-            on_segment(float(seg.end or 0.0), total, "\n".join(parts))
-    return "\n".join(parts)
+    def collect(segments, info) -> str:
+        total = float(getattr(info, "duration", 0.0) or 0.0)
+        parts: list[str] = []
+        for seg in segments:
+            text = seg.text.strip()
+            if text:
+                parts.append(text)
+            if on_segment is not None:
+                on_segment(float(seg.end or 0.0), total, "\n".join(parts))
+        return "\n".join(parts)
+
+    try:
+        return collect(*decode(model))
+    except RuntimeError as exc:
+        # ctranslate2 能认出显卡，却可能到真正前向时才发现缺 DLL 或显存不够。
+        # 这类错只在 GPU 上出现：降级 CPU 重跑一次，别把 DLL 名字甩给用户。
+        if _pick_device()[0] != "cuda":
+            raise
+        if not any(mark in str(exc).lower() for mark in _CUDA_ERROR_MARKS):
+            raise
+        _fall_back_to_cpu()
+
+    return collect(*decode(_load_model(model_size)))
 
 
 def _transcribe_sync(
