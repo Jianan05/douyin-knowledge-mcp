@@ -325,6 +325,187 @@ async def _get_douyin_video_object(page_url: str) -> dict:
         ) from e
 
 
+# ── 抖音：专用浏览器捕获媒体（主方案）────────────────────
+
+_BASE_DIR = Path(__file__).resolve().parent
+TRANSCRIPT_DIR = _BASE_DIR / "transcripts"
+
+
+def _bundled_ffmpeg() -> str | None:
+    """优先用 runtime 里 Playwright 自带的 ffmpeg，其次用系统 PATH 上的。"""
+    root = _BASE_DIR / "runtime" / "ms-playwright"
+    if root.is_dir():
+        for child in sorted(root.glob("ffmpeg-*")):
+            for name in ("ffmpeg-win64.exe", "ffmpeg-linux", "ffmpeg-mac"):
+                exe = child / name
+                if exe.is_file():
+                    return str(exe)
+    return shutil.which("ffmpeg")
+
+
+def _av_stream_types(path: str) -> set[str]:
+    """用 PyAV（faster-whisper 的依赖）判断文件里有哪些流，不依赖外部 ffprobe。"""
+    try:
+        import av
+    except ImportError:
+        return set()
+    try:
+        with av.open(path) as container:
+            return {stream.type for stream in container.streams}
+    except Exception:
+        return set()
+
+
+def _file_has_audio(path: str) -> bool:
+    return "audio" in _av_stream_types(path)
+
+
+def _file_has_video(path: str) -> bool:
+    return "video" in _av_stream_types(path)
+
+
+def _remux_hls_sync(url: str, out_path: str, headers: dict) -> None:
+    """m3u8 用 ffmpeg 合流；请求头（含 Cookie）通过参数传入，不写日志。"""
+    ffmpeg = _bundled_ffmpeg()
+    if not ffmpeg:
+        raise RuntimeError("这条视频只有 m3u8 流，需要 ffmpeg 才能合并，但没找到可用的 ffmpeg")
+    header_lines = "".join(
+        f"{key}: {value}\r\n" for key, value in headers.items() if key.lower() != "host"
+    )
+    proc = subprocess.run(
+        [ffmpeg, "-y", "-headers", header_lines, "-i", url, "-c", "copy", out_path],
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0 or not os.path.exists(out_path) or os.path.getsize(out_path) == 0:
+        raise RuntimeError("m3u8 合并失败")
+
+
+async def _capture_douyin_media(
+    page_url: str,
+    out_dir: str,
+    need: str = "audio",
+    on_progress=None,
+) -> str:
+    """
+    用专用持久化浏览器打开页面，捕获媒体流并下载到本地，返回文件路径。
+
+    need="audio": 转录用，要求文件里有音频流（优先纯音频候选）。
+    need="video": 存档用，要求文件里有画面。
+    """
+    import douyin_browser as db
+
+    loop = asyncio.get_running_loop()
+    errors: list[str] = []
+
+    async with db.DouyinSession(headless=True) as session:
+        result = await session.capture(page_url)
+        candidates = result.ordered()
+        if need == "video":
+            # 存档要画面，纯音频候选排到最后。
+            candidates.sort(key=lambda c: 1 if c.kind == "audio" else 0)
+
+        for index, cand in enumerate(candidates[:6]):
+            suffix = ".m4a" if cand.kind == "audio" else ".mp4"
+            out_path = os.path.join(out_dir, f"douyin_{need}_{index}{suffix}")
+            headers = session.headers_for(cand.url)
+            try:
+                if cand.kind == "hls":
+                    out_path = os.path.join(out_dir, f"douyin_{need}_{index}.mp4")
+                    await loop.run_in_executor(
+                        _DOWNLOAD_EXECUTOR,
+                        functools.partial(_remux_hls_sync, cand.url, out_path, headers),
+                    )
+                else:
+                    try:
+                        await loop.run_in_executor(
+                            _DOWNLOAD_EXECUTOR,
+                            functools.partial(
+                                _download_sync,
+                                cand.url,
+                                out_path,
+                                headers=headers,
+                                progress_cb=on_progress,
+                            ),
+                        )
+                    except Exception as direct_error:
+                        # 直连被拒时改用 browser context 自己的请求客户端。
+                        errors.append(f"{cand.kind}/直连 {type(direct_error).__name__}")
+                        await session.fetch_via_browser(cand.url, out_path)
+            except Exception as exc:
+                errors.append(f"{cand.kind}/{type(exc).__name__}")
+                continue
+
+            if need == "audio" and not _file_has_audio(out_path):
+                errors.append(f"{cand.kind}/无音频流")
+                continue
+            if need == "video" and not _file_has_video(out_path):
+                errors.append(f"{cand.kind}/无画面")
+                continue
+
+            if len(_LAST_CAPTURE_META) > 64:  # 只留最近的几十条，别让它无限长
+                _LAST_CAPTURE_META.clear()
+            _LAST_CAPTURE_META[out_path] = {
+                "title": result.title,
+                "video_id": result.video_id,
+                "logged_in": result.logged_in,
+            }
+            return out_path
+
+        detail = "; ".join(errors[-4:]) or "没有可用候选"
+        stage = db.STAGE_DOWNLOAD
+        hint = "登录态可能已过期，运行「登录抖音」重新扫码；或换一条链接"
+        raise db.DouyinBrowserError(
+            stage,
+            f"捕获到 {len(candidates)} 条媒体候选，但都无法用于{'转录' if need == 'audio' else '存档'}（{detail}）",
+            hint,
+        )
+
+
+# 下载文件 → 元数据（标题/视频 ID），供自动保存 TXT 用。
+_LAST_CAPTURE_META: dict[str, dict] = {}
+
+
+def capture_meta(path: str) -> dict:
+    return _LAST_CAPTURE_META.get(path, {})
+
+
+def _safe_filename(text: str, limit: int = 40) -> str:
+    cleaned = re.sub(r'[\/:*?"<>|\r\n\t]+', "_", (text or "").strip())
+    cleaned = re.sub(r"_{2,}", "_", cleaned).strip("_ .")
+    return cleaned[:limit]
+
+
+def save_transcript(
+    text: str,
+    url: str = "",
+    title: str = "",
+    platform: str = "",
+    video_id: str = "",
+) -> str:
+    """把文字稿写成 UTF-8 TXT，返回绝对路径。"""
+    TRANSCRIPT_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    parts = [stamp]
+    if platform:
+        parts.append(platform)
+    if video_id:
+        parts.append(video_id)
+    name_hint = _safe_filename(title)
+    if name_hint:
+        parts.append(name_hint)
+    out_path = TRANSCRIPT_DIR / ("_".join(parts) + ".txt")
+    header = []
+    if title:
+        header.append(f"标题：{title}")
+    if url:
+        header.append(f"链接：{url}")
+    header.append(f"转录时间：{time.strftime('%Y-%m-%d %H:%M:%S')}")
+    body = "\n".join(header) + "\n" + "-" * 40 + "\n" + text.strip() + "\n"
+    out_path.write_text(body, encoding="utf-8")
+    return str(out_path)
+
+
 # ── URL 选取（纯内存操作，无网络调用）────────────────────
 
 def _external_cdn_urls(urls) -> list[str]:
@@ -884,7 +1065,13 @@ def _transcribe_segments_sync(
     if model_size not in _ALLOWED_MODELS:
         model_size = WHISPER_MODEL
     model = WhisperModel(model_size, device="cpu", compute_type="int8")
-    segments, info = model.transcribe(file_path, beam_size=1)
+    # initial_prompt 用简体中文示例：Whisper 默认常输出繁体，抖音语料后续要进
+    # RAG/摘要，统一成简体更省事。英文口播不受影响（语言仍然自动识别）。
+    segments, info = model.transcribe(
+        file_path,
+        beam_size=1,
+        initial_prompt="以下是普通话的句子，请用简体中文转写。",
+    )
     total = float(getattr(info, "duration", 0.0) or 0.0)
 
     parts: list[str] = []
@@ -904,6 +1091,45 @@ def _transcribe_sync(file_path: str, model_size: str = WHISPER_MODEL) -> str:
 
 # ── 通用平台流程 ─────────────────────────────────────────
 
+async def _download_douyin_media(
+    real_url: str, out_dir: str, need: str = "audio", on_progress=None
+) -> str:
+    """
+    抖音媒体获取的统一入口。
+
+    主方案：专用持久化浏览器（真实登录态）捕获页面里实际播放的媒体流。
+    兜底：旧的 aweme/detail 拦截 + 分享页解析（无登录态时基本已失效，仅作保险）。
+    两条都失败时把两边的原因一起抛出，方便区分是登录、验证码还是媒体获取的问题。
+    """
+    loop = asyncio.get_running_loop()
+    try:
+        return await _capture_douyin_media(
+            real_url, out_dir, need=need, on_progress=on_progress
+        )
+    except Exception as browser_error:
+        primary = browser_error
+
+    try:
+        video = await _get_douyin_video_object(real_url)
+        dl_url = (
+            _pick_url_for_transcription(video) if need == "audio" else _pick_url_for_download(video)
+        )
+        out_path = os.path.join(out_dir, f"douyin_legacy_{need}.mp4")
+        await loop.run_in_executor(
+            _DOWNLOAD_EXECUTOR,
+            functools.partial(_download_sync, dl_url, out_path, progress_cb=on_progress),
+        )
+        if need == "audio" and not _file_has_audio(out_path):
+            raise RuntimeError("旧方案下载到的文件没有音频流")
+        if need == "video" and not _file_has_video(out_path):
+            raise RuntimeError("旧方案下载到的文件没有画面")
+        return out_path
+    except Exception as legacy_error:
+        raise RuntimeError(
+            f"{primary}\n（旧方案兜底也失败：{legacy_error}）"
+        ) from primary
+
+
 async def _download_transcription_media(
     real_url: str, out_dir: str, on_progress=None
 ) -> tuple[str, str]:
@@ -916,14 +1142,9 @@ async def _download_transcription_media(
     platform = _detect_platform(real_url)
     loop = asyncio.get_running_loop()
     if platform == "douyin":
-        video = await _get_douyin_video_object(real_url)
-        dl_url = _pick_url_for_transcription(video)
-        out_path = os.path.join(out_dir, "douyin_media.mp4")
-        await loop.run_in_executor(
-            _DOWNLOAD_EXECUTOR,
-            functools.partial(_download_sync, dl_url, out_path, progress_cb=on_progress),
+        out_path = await _download_douyin_media(
+            real_url, out_dir, need="audio", on_progress=on_progress
         )
-        await loop.run_in_executor(_DOWNLOAD_EXECUTOR, _ensure_audio_stream, out_path)
         return out_path, platform
     if platform == "bilibili":
         out_path = await loop.run_in_executor(
@@ -949,14 +1170,9 @@ async def _download_video_file(
     platform = _detect_platform(real_url)
     loop = asyncio.get_running_loop()
     if platform == "douyin":
-        video = await _get_douyin_video_object(real_url)
-        dl_url = _pick_url_for_download(video)
-        out_path = os.path.join(out_dir, "douyin_video.mp4")
-        await loop.run_in_executor(
-            _DOWNLOAD_EXECUTOR,
-            functools.partial(_download_sync, dl_url, out_path, progress_cb=on_progress),
+        out_path = await _download_douyin_media(
+            real_url, out_dir, need="video", on_progress=on_progress
         )
-        await loop.run_in_executor(_DOWNLOAD_EXECUTOR, _ensure_video_stream, out_path)
         return out_path, platform
     if platform == "bilibili":
         out_path = await loop.run_in_executor(

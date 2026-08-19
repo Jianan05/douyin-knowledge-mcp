@@ -33,6 +33,8 @@ from server import (
     _platform_label,
     _transcribe_segments_sync,
     _TRANSCRIBE_EXECUTOR,
+    capture_meta,
+    save_transcript,
 )
 
 WEB_DEFAULT_MODEL = "base"
@@ -50,8 +52,16 @@ def _format_error(exc: Exception) -> str:
         hints.append("Bilibili 下载完整视频需要 ffmpeg，可用 winget install Gyan.FFmpeg 安装")
     if "no audio" in lower or "没有音频" in message:
         hints.append("下载到的媒体没有音频流；可换一个链接，或更新后重试")
+    if "[登录]" in message:
+        hints.append("打开「🔐 抖音登录」标签页，在弹出的专用浏览器里扫码登录一次")
+    if "[验证码]" in message:
+        hints.append("在「🔐 抖音登录」的可见窗口里手动通过一次验证，再回来重试")
+    if "[媒体获取]" in message:
+        hints.append("先确认这条链接在专用浏览器里能正常播放；不能播放就不是本工具的问题")
+    if "[下载]" in message:
+        hints.append("登录态可能过期了，重新登录一次；或稍后重试")
     if hints:
-        message = f"{message}\n\n建议：" + "；".join(hints)
+        message = f"{message}\n\n建议：" + "；".join(dict.fromkeys(hints))
     return message
 
 
@@ -235,9 +245,22 @@ def transcribe(
     progress(1.0, desc="完成")
     elapsed = time.monotonic() - started
     chars = len(text.replace("\n", "").replace(" ", ""))
+    meta = capture_meta(media_path)
+    try:
+        txt_path = save_transcript(
+            text,
+            url=real_url,
+            title=meta.get("title", ""),
+            platform=platform,
+            video_id=meta.get("video_id", ""),
+        )
+        saved_line = f"\n\n📄 已保存：`{txt_path}`"
+    except Exception as exc:  # noqa: BLE001 - 保存失败不影响已经拿到的文字稿
+        saved_line = f"\n\n⚠️ 文字稿保存失败：{exc}"
     status = (
         f"✅ **完成** · {_platform_label(platform)} · 媒体 {size_mb:.1f}MB · "
         f"模型 {model_size} · 约 {chars} 字 · 耗时 {_fmt_secs(elapsed)}"
+        f"{saved_line}"
     )
     yield text, status
 
@@ -294,6 +317,34 @@ def download_only(
     except Exception as e:
         progress(None)
         yield hidden, "", f"❌ 失败：{_format_error(e)}"
+
+
+def douyin_login_status() -> str:
+    """检查专用浏览器的抖音登录态。"""
+    import douyin_browser as db
+
+    try:
+        if not db.profile_exists():
+            return "⚪ 还没有专用浏览器 profile，点上面的按钮登录一次。"
+        logged_in = asyncio.run(db.login_status())
+    except Exception as exc:  # noqa: BLE001
+        return f"❌ 检查失败：{_format_error(exc)}"
+    if logged_in:
+        return "✅ 专用浏览器已登录，可以直接转录。"
+    return "⚠️ 专用浏览器未登录（或登录已过期），请点上面的按钮重新登录。"
+
+
+def douyin_login() -> str:
+    """打开可见的专用浏览器，等用户本人扫码登录。程序不接触密码。"""
+    import douyin_browser as db
+
+    try:
+        logged_in = asyncio.run(db.login(timeout_s=300))
+    except Exception as exc:  # noqa: BLE001
+        return f"❌ 登录窗口出错：{_format_error(exc)}"
+    if logged_in:
+        return "✅ 登录成功，登录态保存在本机专用 profile 里，重启工具后仍然有效。"
+    return "⚠️ 5 分钟内没检测到登录态（窗口关掉了或还没扫码），可以再点一次重试。"
 
 
 THEME = gr.themes.Soft(
@@ -470,6 +521,23 @@ with gr.Blocks(title="视频转文字 / Douyin & Bilibili to Text") as demo:
             outputs=[dl_file_main, dl_path_main, dl_status_main],
             show_progress_on=dl_status_main,
         )
+
+    with gr.Tab("🔐 抖音登录"):
+        with gr.Group(elem_classes="soft-card"):
+            gr.Markdown(
+                "抖音现在必须带登录态才给媒体流。这里会打开一个**本工具专用**的浏览器窗口"
+                "（和日常的 Chrome/Edge 完全隔离，也不读取它们的 Cookie），"
+                "**由你本人**在里面扫码登录一次即可。\n\n"
+                "- 程序不接触密码，只等浏览器自己拿到登录 Cookie。\n"
+                "- 登录态存在 `data/douyin-browser-profile/`，已加入 .gitignore，重启工具后依然有效。\n"
+                "- 遇到滑块/验证码，也在这个窗口里手动通过一次。"
+            )
+            with gr.Row():
+                login_btn = gr.Button("打开抖音登录窗口", variant="primary")
+                login_status_btn = gr.Button("检查登录状态")
+            login_status_out = gr.Markdown("点「检查登录状态」看看当前有没有登录。")
+        login_btn.click(fn=douyin_login, inputs=None, outputs=login_status_out)
+        login_status_btn.click(fn=douyin_login_status, inputs=None, outputs=login_status_out)
 
     with gr.Tab("⬇️ 仅下载视频"):
         with gr.Group(elem_classes="soft-card"):

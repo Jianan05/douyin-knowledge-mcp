@@ -217,12 +217,21 @@ Claude Desktop 配置示例：
 
 ### 技术原理
 
-抖音：
+抖音（`douyin_browser.py`）：
 
-- 用 headless Chromium 打开页面。
-- 拦截 `aweme/v1/web/aweme/detail` 接口。
-- 如果浏览器没有拦截到接口，会回退到移动端分享页里的 `window._ROUTER_DATA` 解析，减少短链偶发失败。
-- 转录时优先使用 `bit_rate_audio` 音频流，没有音频流时回退到带音频的 MP4。
+- 用**专用持久化浏览器 profile**（`data/douyin-browser-profile/`）打开视频页，和日常的
+  Chrome/Edge 完全隔离，也不读取它们的 Cookie。
+- 必须用完整 Chromium（`channel="chromium"` 的新版 headless）。旧的 headless shell 里抖音
+  根本不给 `<video>` 喂流（实测 `readyState` 一直是 0），这是老版本"拦不到接口"的真正原因。
+- 不再只等一个接口名，而是同时收集五路信号：`aweme/detail` 等 JSON 响应、`Content-Type` 为
+  `video/*` `audio/*` 的媒体响应、页面里的 `video.currentSrc` / `video.src`、
+  `performance.getEntriesByType('resource')`，以及 CDP `Network.*` 事件（MSE 分片请求也能拿到）。
+- 下载时复用同一个 browser context 的 Cookie / Referer / UA；直连被拒时自动改用
+  context 自带的请求客户端。Cookie 只在内存里传递，日志和报错都不会输出 Cookie 值。
+- 候选优先级：纯音频 → 渐进式 MP4 → HLS，下载后用 PyAV 校验确实有音频流，没有就换下一条。
+- 普通公开视频通常**不需要登录**。遇到需要登录或验证码的视频，在网页的「🔐 抖音登录」
+  标签页里打开可见窗口，由你本人扫码/过验证一次，登录态存在专用 profile 里，重启后仍然有效。
+- 旧的 `aweme/detail` 拦截 + 分享页 `window._ROUTER_DATA` 解析保留为兜底。
 
 Bilibili：
 
@@ -234,12 +243,17 @@ Whisper：
 
 - 语言自动识别，适合中文、英文或中英混杂视频。
 - 默认 CPU + int8，速度优先，不需要显卡。
+- `initial_prompt` 用简体中文示例，避免 Whisper 默认输出繁体。
+- 网页端转录成功后自动把文字稿存成 UTF-8 TXT 到 `transcripts/`，文件名带时间戳、视频 ID
+  和标题，页面上会显示完整路径。
 
 ### 已知限制
 
 - 主要测试单视频链接。合集、图集、直播回放不保证。
 - Bilibili 未登录时通常只能拿到游客可看的清晰度；1080P、4K、会员视频需要 cookies，本项目暂未做登录/cookies 导入界面。
 - 抖音或 Bilibili 修改网页接口时，抓取可能失效，需要更新代码或 `yt-dlp`。
+- 抖音抓取会真的打开一个浏览器页面并播放几秒，所以每条视频有大约 10 秒的固定开销。
+- `data/`（浏览器 profile、Cookie）和 `transcripts/` 属于本地私有数据，已加入 `.gitignore`。
 - 语音识别质量取决于音频质量、背景音乐、多人重叠、模型大小。
 
 ### 常见问题
