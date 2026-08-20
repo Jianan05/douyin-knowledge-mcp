@@ -106,10 +106,13 @@ class Library:
 
     def __init__(self, root: Path):
         self.root = root
+        # 文件位置 = 状态：inbox/ 是还没写笔记的，notes/ 是写完的。
+        # 这样在文件管理器里一眼看得出来，不用打开文件看 frontmatter。
         self.inbox = root / "inbox"
+        self.notes = root / "notes"
         self.unsorted = root / "_待分类"
         self.index_path = root / "index.jsonl"
-        for directory in (self.inbox, self.unsorted):
+        for directory in (self.inbox, self.notes, self.unsorted):
             directory.mkdir(parents=True, exist_ok=True)
         self._seen = self._load_index()
 
@@ -175,6 +178,117 @@ class Library:
         ]
         path.write_text("\n".join(lines), encoding="utf-8")
         return path
+
+
+_FIELD_RE_CACHE: dict[str, "re.Pattern"] = {}
+
+
+def read_front_matter(path: Path) -> dict:
+    """读 .md 头部的 frontmatter。只认我们自己写的那几个字段，不引 yaml 依赖。"""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    if not text.startswith("---"):
+        return {}
+    end = text.find("\n---", 3)
+    if end < 0:
+        return {}
+    meta: dict = {}
+    for line in text[3:end].splitlines():
+        if ":" not in line:
+            continue
+        key, _, value = line.partition(":")
+        value = value.strip()
+        if value.startswith("[") and value.endswith("]"):
+            inner = value[1:-1].strip()
+            meta[key.strip()] = [
+                v.strip().strip('"') for v in inner.split(",") if v.strip()
+            ] if inner else []
+        else:
+            meta[key.strip()] = value.strip('"')
+    return meta
+
+
+def scan_library(lib: Library) -> list[tuple[Path, dict]]:
+    """扫遍库里所有 .md（备份目录除外），返回 (路径, frontmatter)。"""
+    rows = []
+    for path in sorted(lib.root.rglob("*.md")):
+        if any(part.startswith("_测试") for part in path.parts):
+            continue
+        meta = read_front_matter(path)
+        if meta.get("video_id") or meta.get("title"):
+            rows.append((path, meta))
+    return rows
+
+
+def cmd_list(lib: Library) -> int:
+    """一览：谁写过笔记、谁还没写。不打印任何正文。"""
+    rows = scan_library(lib)
+    if not rows:
+        print(f"库是空的：{lib.root}")
+        return 0
+    raw = [r for r in rows if r[1].get("status") != "noted"]
+    noted = [r for r in rows if r[1].get("status") == "noted"]
+
+    def show(title: str, items) -> None:
+        print(f"\n{title}（{len(items)} 条）")
+        for path, meta in items:
+            tags = meta.get("tags") or []
+            tag_hint = ("#" + " #".join(tags[:3])) if tags else "无标签"
+            category = meta.get("category") or "-"
+            print(
+                f"  {meta.get('video_id', ''):20s} {meta.get('chars', '0'):>5}字 "
+                f"{category:10s} {tag_hint:34s} {meta.get('title', '')[:26]}"
+            )
+
+    print(f"库 {lib.root}")
+    show("○ 未写笔记（inbox）", raw)
+    show("● 已写笔记（notes）", noted)
+    print(f"\n合计 {len(rows)} 条：未写 {len(raw)}，已写 {len(noted)}")
+    return 0
+
+
+def cmd_sync(lib: Library) -> int:
+    """
+    按 frontmatter 把文件挪到该在的位置，并重建索引。
+
+    笔记写完（status 改成 noted）后跑一次，文件就从 inbox/ 移到
+    notes/<category>/。分类还没定时 category 是空的，就直接放 notes/ 根下。
+    """
+    rows = scan_library(lib)
+    moved = 0
+    records = []
+    for path, meta in rows:
+        noted = meta.get("status") == "noted"
+        category = (meta.get("category") or "").strip()
+        if noted:
+            target_dir = lib.notes / category if category else lib.notes
+        else:
+            target_dir = lib.inbox / category if category else lib.inbox
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target = target_dir / path.name
+        if target != path:
+            path.replace(target)
+            moved += 1
+            path = target
+        records.append({
+            "video_id": meta.get("video_id", ""),
+            "url": meta.get("source", ""),
+            "title": meta.get("title", ""),
+            "tags": meta.get("tags") or [],
+            "path": str(path),
+            "status": meta.get("status", "raw"),
+            "category": category,
+            "chars": int(meta.get("chars") or 0),
+            "duration": float(meta.get("duration") or 0),
+            "at": meta.get("transcribed_at", ""),
+        })
+    with lib.index_path.open("w", encoding="utf-8", newline="\n") as handle:
+        for row in records:
+            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+    print(f"归位 {moved} 个文件，索引重建 {len(records)} 条")
+    return 0
 
 
 async def ingest_one(url_text: str, lib: Library, model: str, force: bool) -> str:
@@ -262,12 +376,18 @@ def read_urls(args) -> list[str]:
 
 
 async def main_async(args) -> int:
+    lib_only = Library(Path(args.dir))
+    if args.list:
+        return cmd_list(lib_only)
+    if args.sync:
+        return cmd_sync(lib_only)
+
     urls = read_urls(args)
     if not urls:
         print("没有输入链接。用法：python ingest.py <链接> [更多链接...]")
         return 2
 
-    lib = Library(Path(args.dir))
+    lib = lib_only
     model = args.model or server.recommended_model()
     print(f"库 {lib.root} | 模型 {model} | 设备 {server.device_label()} | 共 {len(urls)} 条")
 
@@ -293,6 +413,8 @@ def main() -> int:
     parser.add_argument("--dir", default=str(DEFAULT_ROOT), help=f"库目录（默认 {DEFAULT_ROOT}）")
     parser.add_argument("--model", help="Whisper 模型；默认按设备自动选")
     parser.add_argument("--force", action="store_true", help="无视去重，重新转录")
+    parser.add_argument("--list", action="store_true", help="只看库里有什么、哪些还没写笔记")
+    parser.add_argument("--sync", action="store_true", help="按 frontmatter 把文件归位并重建索引")
     args = parser.parse_args()
     return asyncio.run(main_async(args))
 
