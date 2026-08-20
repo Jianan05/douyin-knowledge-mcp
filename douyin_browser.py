@@ -182,6 +182,7 @@ class CaptureResult:
         title: str,
         video_id: str,
         logged_in: bool,
+        page_duration: float = 0.0,
     ):
         self.candidates = candidates
         self.headers = headers  # 含 Cookie，⛔ 不要打印
@@ -189,6 +190,9 @@ class CaptureResult:
         self.title = title
         self.video_id = video_id
         self.logged_in = logged_in
+        # 页面播放器报的时长。抖音视频页会同时预载推荐位的其它视频，
+        # 拿它当标尺才能识破「抓到隔壁视频」这种错。
+        self.page_duration = page_duration
 
     def ordered(self) -> list[MediaCandidate]:
         """转录优先级：纯音频 → 渐进式 mp4 → HLS → 其它。"""
@@ -314,6 +318,7 @@ class DouyinSession:
         candidates: dict[str, MediaCandidate] = {}
         json_payloads: list[dict] = []
         captcha_seen = False
+        page_duration = 0.0
 
         def add(url: str, mime: str = "", source: str = "", size: int = 0) -> None:
             if not _is_media_url(url, mime):
@@ -407,13 +412,23 @@ class DouyinSession:
 
             # video.currentSrc / video.src
             try:
-                srcs = await page.evaluate(
+                info = await page.evaluate(
                     """() => Array.from(document.querySelectorAll('video'))
-                        .flatMap(v => [v.currentSrc, v.src])
-                        .filter(Boolean)"""
+                        .map(v => ({
+                            srcs: [v.currentSrc, v.src].filter(Boolean),
+                            dur: isFinite(v.duration) ? v.duration : 0,
+                            playing: !v.paused && v.readyState > 2,
+                        }))"""
                 )
-                for src in srcs or []:
-                    add(src, "", "video-element")
+                for entry in info or []:
+                    for src in entry.get("srcs") or []:
+                        add(src, "", "video-element")
+                    # 取正在播放的那个播放器的时长；没有就取最长的。
+                    dur = float(entry.get("dur") or 0)
+                    if entry.get("playing") and dur > page_duration:
+                        page_duration = dur
+                    elif dur > page_duration and page_duration == 0:
+                        page_duration = dur
             except Exception:
                 pass
 
@@ -469,6 +484,7 @@ class DouyinSession:
             title=title,
             video_id=_extract_video_id(final_url) or _extract_video_id(page_url),
             logged_in=logged_in,
+            page_duration=page_duration,
         )
 
         if not result.candidates:

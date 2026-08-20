@@ -111,6 +111,7 @@ class Library:
         self.inbox = root / "inbox"
         self.notes = root / "notes"
         self.unsorted = root / "_待分类"
+        self.replaced = root / "_已替换"
         self.index_path = root / "index.jsonl"
         for directory in (self.inbox, self.notes, self.unsorted):
             directory.mkdir(parents=True, exist_ok=True)
@@ -136,6 +137,19 @@ class Library:
 
     def known(self, video_id: str) -> dict | None:
         return self._seen.get(video_id)
+
+    def retire(self, video_id: str) -> str:
+        """--force 重转时，把同一视频的旧文件挪进 _已替换/，不直接删。"""
+        old = self._seen.get(video_id)
+        if not old:
+            return ""
+        old_path = Path(old.get("path", ""))
+        if not old_path.is_file():
+            return ""
+        self.replaced.mkdir(parents=True, exist_ok=True)
+        target = self.replaced / old_path.name
+        old_path.replace(target)
+        return target.name
 
     def record(self, row: dict) -> None:
         key = row.get("video_id") or row.get("url")
@@ -214,7 +228,10 @@ def scan_library(lib: Library) -> list[tuple[Path, dict]]:
     """扫遍库里所有 .md（备份目录除外），返回 (路径, frontmatter)。"""
     rows = []
     for path in sorted(lib.root.rglob("*.md")):
-        if any(part.startswith("_测试") for part in path.parts):
+        # 下划线开头的目录是归档区（_已替换 / 备份），只有 _待分类 参与流转。
+        if any(
+            part.startswith("_") and part != "_待分类" for part in path.parts
+        ):
             continue
         meta = read_front_matter(path)
         if meta.get("video_id") or meta.get("title"):
@@ -343,6 +360,7 @@ async def ingest_one(url_text: str, lib: Library, model: str, force: bool) -> st
         "model": model,
         "device": server.device_label(),
     }
+    retired = lib.retire(video_id) if force else ""
     path = lib.write_note(row_meta, transcript)
     lib.record({
         "video_id": video_id,
@@ -357,6 +375,8 @@ async def ingest_one(url_text: str, lib: Library, model: str, force: bool) -> st
     })
 
     tag_hint = ("#" + " #".join(tags[:3])) if tags else "无标签"
+    if retired:
+        tag_hint += " (旧版已挪到 _已替换)"
     if not transcript.strip():
         return f"[warn] {video_id} | {title[:28]} | 无语音内容 | {path.name}"
     return (

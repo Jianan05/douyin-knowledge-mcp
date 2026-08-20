@@ -356,6 +356,19 @@ def _av_stream_types(path: str) -> set[str]:
         return set()
 
 
+def media_duration(path: str) -> float:
+    """用 PyAV 读文件时长（秒）。读不出来返回 0。"""
+    try:
+        import av
+
+        with av.open(path) as container:
+            if container.duration:
+                return round(container.duration / 1_000_000, 2)
+    except Exception:
+        pass
+    return 0.0
+
+
 def _file_has_audio(path: str) -> bool:
     return "audio" in _av_stream_types(path)
 
@@ -435,6 +448,15 @@ async def _capture_douyin_media(
             except Exception as exc:
                 errors.append(f"{cand.kind}/{type(exc).__name__}")
                 continue
+
+            # 抖音视频页会预载推荐位的其它视频，媒体请求混在一起。
+            # 拿页面播放器的时长当标尺，对不上的直接判定为「抓到隔壁视频」。
+            expected = float(getattr(result, "page_duration", 0) or 0)
+            if expected > 3:
+                actual = media_duration(out_path)
+                if actual > 0 and abs(actual - expected) > max(3.0, expected * 0.2):
+                    errors.append(f"{cand.kind}/时长对不上({actual:.0f}s≠{expected:.0f}s)")
+                    continue
 
             if need == "audio" and not _file_has_audio(out_path):
                 errors.append(f"{cand.kind}/无音频流")
