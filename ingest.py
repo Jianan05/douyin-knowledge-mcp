@@ -239,6 +239,85 @@ def scan_library(lib: Library) -> list[tuple[Path, dict]]:
     return rows
 
 
+RULES_PATH = Path(__file__).resolve().parent / "categories.toml"
+
+
+def load_rules(path: Path = RULES_PATH) -> list[dict]:
+    """读分类规则表。顺序即优先级，第一条命中就定。"""
+    if not path.is_file():
+        return []
+    import tomllib
+
+    with path.open("rb") as handle:
+        data = tomllib.load(handle)
+    return data.get("rule", [])
+
+
+def match_category(meta: dict, rules: list[dict]) -> str:
+    title = (meta.get("title") or "").lower()
+    tags = {t.lower() for t in (meta.get("tags") or [])}
+    for rule in rules:
+        if tags & {t.lower() for t in rule.get("tags", [])}:
+            return rule["name"]
+        if any(k.lower() in title for k in rule.get("keywords", [])):
+            return rule["name"]
+    return ""
+
+
+def set_front_matter_field(path: Path, key: str, value: str) -> None:
+    """只改 frontmatter 里的一个字段，正文一个字节不动。"""
+    text = path.read_text(encoding="utf-8")
+    pattern = re.compile(rf"^{re.escape(key)}: .*$", re.M)
+    replacement = f'{key}: "{value}"'
+    head, sep, body = text.partition("\n---")
+    if not sep:
+        return
+    if pattern.search(head):
+        head = pattern.sub(replacement, head, count=1)
+    else:
+        head = head.rstrip() + "\n" + replacement
+    path.write_text(head + sep + body, encoding="utf-8")
+
+
+def cmd_classify(lib: Library, apply: bool) -> int:
+    """
+    按 categories.toml 给还没分类的条目打上 category。
+
+    默认只预览（--classify），确认没问题再加 --apply 落盘。
+    分类只看标题和标签，**从不读转写稿正文**。
+    """
+    rules = load_rules()
+    if not rules:
+        print(f"没找到规则表：{RULES_PATH}")
+        return 2
+
+    buckets: dict[str, list] = {}
+    for path, meta in scan_library(lib):
+        category = (meta.get("category") or "").strip() or match_category(meta, rules)
+        buckets.setdefault(category or "_待分类", []).append((path, meta, category))
+
+    for name in sorted(buckets, key=lambda k: (k == "_待分类", k)):
+        items = buckets[name]
+        print(f"\n{name}（{len(items)} 条）")
+        for path, meta, _ in items:
+            print(f"  {int(meta.get('chars') or 0):6d}字  {meta.get('title', '')[:34]}")
+
+    if not apply:
+        print("\n以上是预览。确认无误后加 --apply 落盘，再跑 --sync 归位。")
+        return 0
+
+    changed = 0
+    for name, items in buckets.items():
+        if name == "_待分类":
+            continue
+        for path, meta, category in items:
+            if category and (meta.get("category") or "").strip() != category:
+                set_front_matter_field(path, "category", category)
+                changed += 1
+    print(f"\n已写入 {changed} 条的 category 字段。接着跑 --sync 把文件归位。")
+    return 0
+
+
 def cmd_list(lib: Library) -> int:
     """一览：谁写过笔记、谁还没写。不打印任何正文。"""
     rows = scan_library(lib)
@@ -401,6 +480,8 @@ async def main_async(args) -> int:
         return cmd_list(lib_only)
     if args.sync:
         return cmd_sync(lib_only)
+    if args.classify:
+        return cmd_classify(lib_only, args.apply)
 
     urls = read_urls(args)
     if not urls:
@@ -435,6 +516,8 @@ def main() -> int:
     parser.add_argument("--force", action="store_true", help="无视去重，重新转录")
     parser.add_argument("--list", action="store_true", help="只看库里有什么、哪些还没写笔记")
     parser.add_argument("--sync", action="store_true", help="按 frontmatter 把文件归位并重建索引")
+    parser.add_argument("--classify", action="store_true", help="按 categories.toml 预览分类结果")
+    parser.add_argument("--apply", action="store_true", help="配合 --classify：把分类写进 frontmatter")
     args = parser.parse_args()
     return asyncio.run(main_async(args))
 
