@@ -1196,6 +1196,33 @@ def build_initial_prompt(terms: str = "") -> str:
     return prompt
 
 
+_PUNCT_RE = re.compile(r"[\s，。、；：！？,.;:!?\-—…·\"'（）()]+")
+
+
+def _normalize_for_echo(text: str) -> str:
+    return _PUNCT_RE.sub("", text or "")
+
+
+def strip_prompt_echo(text: str, prompt: str) -> str:
+    """
+    去掉 Whisper 把 initial_prompt 当正文续写出来的部分。
+
+    低语音内容（纯音乐、环境音）上很常见：没话可听时它顺着 prompt 往下写，
+    结果整段「转写稿」其实是「请用简体中文转写。内容可能涉及这些术语：…」。
+    这种脏数据比空结果更坑——看着像正常内容，会直接污染知识库。
+    """
+    if not text or not prompt:
+        return text
+    needle = _normalize_for_echo(prompt)
+    kept = []
+    for line in text.splitlines():
+        norm = _normalize_for_echo(line)
+        if len(norm) >= 6 and norm in needle:
+            continue
+        kept.append(line)
+    return "\n".join(kept).strip()
+
+
 def _transcribe_segments_sync(
     file_path: str,
     model_size: str = WHISPER_MODEL,
@@ -1224,13 +1251,21 @@ def _transcribe_segments_sync(
     # VAD 还能跳过静音段，顺带压掉 Whisper 在无声处的幻觉重复。
     # initial_prompt 用简体中文并带上常见术语：Whisper 默认爱输出繁体，
     # 抖音语料后续要进 RAG/摘要，统一简体更省事。英文口播不受影响。
-    def decode(active_model):
-        runner, extra = _decoder(active_model)
+    def decode(active_model, use_vad: bool = True, use_prompt: bool = True):
+        if use_vad:
+            runner, extra = _decoder(active_model)
+            # Silero 默认 threshold=0.5 会把「带伴奏的唱歌」判成非人声，
+            # 整条视频被切成空。放宽到 0.3，再配合下面的空结果重试兜底。
+            extra["vad_parameters"] = {"threshold": 0.3, "min_silence_duration_ms": 800}
+        else:
+            # BatchedInferencePipeline 靠 VAD 切片，关掉 VAD 它会直接报
+            # "No clip timestamps found"，所以兜底这一趟只能走普通模型。
+            runner, extra = active_model, {}
         return runner.transcribe(
             file_path,
             beam_size=5,
-            vad_filter=True,
-            initial_prompt=build_initial_prompt(terms),
+            vad_filter=use_vad,
+            initial_prompt=build_initial_prompt(terms) if use_prompt else None,
             **extra,
         )
 
@@ -1245,8 +1280,29 @@ def _transcribe_segments_sync(
                 on_segment(float(seg.end or 0.0), total, "\n".join(parts))
         return "\n".join(parts)
 
+    prompt = build_initial_prompt(terms)
+
+    def attempt(active_model, use_vad: bool, use_prompt: bool) -> str:
+        text = collect(*decode(active_model, use_vad=use_vad, use_prompt=use_prompt))
+        return strip_prompt_echo(text, prompt) if use_prompt else text.strip()
+
+    def run(active_model) -> str:
+        """
+        三级兜底，每级只在上一级交白卷时才跑：
+        1. VAD + 术语 prompt —— 正常路径；
+        2. 关 VAD —— VAD 会把带伴奏的唱歌整条切没；
+        3. 连 prompt 一起去掉 —— 术语表在音乐类内容上会引发幻觉和回声。
+        """
+        text = attempt(active_model, use_vad=True, use_prompt=True)
+        if text:
+            return text
+        text = attempt(active_model, use_vad=False, use_prompt=True)
+        if text:
+            return text
+        return attempt(active_model, use_vad=False, use_prompt=False)
+
     try:
-        return collect(*decode(model))
+        return run(model)
     except RuntimeError as exc:
         # ctranslate2 能认出显卡，却可能到真正前向时才发现缺 DLL 或显存不够。
         # 这类错只在 GPU 上出现：降级 CPU 重跑一次，别把 DLL 名字甩给用户。
@@ -1256,7 +1312,7 @@ def _transcribe_segments_sync(
             raise
         _fall_back_to_cpu(f"{type(exc).__name__}: {str(exc)[:80]}")
 
-    return collect(*decode(_load_model(model_size)))
+    return run(_load_model(model_size))
 
 
 def _transcribe_sync(
