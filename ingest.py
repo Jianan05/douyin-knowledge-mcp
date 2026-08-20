@@ -49,6 +49,24 @@ def _split_tags(title: str) -> tuple[str, list[str]]:
     return clean or (title or "").strip(), tags
 
 
+def _clean_url(url: str) -> str:
+    """去掉分享链接上的追踪参数，留一个干净、能长期回溯的地址。"""
+    return url.split("?")[0] if "douyin.com/video/" in url else url
+
+
+def _one_line(text: str, limit: int = 70) -> str:
+    """
+    压成单行。
+
+    抖音的「标题」其实是整段作品描述，经常带换行和项目符号。原样写进
+    frontmatter 的 title: 会变成多行，**任何标准 YAML 解析器都会解析失败**
+    （Obsidian、脚本都读不了）。所以 title 只留压平后的一行，完整描述
+    另放 desc 字段和正文顶部。
+    """
+    flat = re.sub(r"\s+", " ", (text or "").replace("\n", " ")).strip()
+    return flat[:limit]
+
+
 def _resolve_video_id(url: str) -> tuple[str, str]:
     """
     把 v.douyin.com 短链跟到真实地址，顺手拿视频 ID，返回 (最终URL, video_id)。
@@ -163,16 +181,19 @@ class Library:
         parts = [stamp, meta.get("platform", "video")]
         if meta.get("video_id"):
             parts.append(meta["video_id"])
-        name_hint = _safe_name(meta.get("title", ""))
+        name_hint = _safe_name(_one_line(meta.get("title", ""), 60))
         if name_hint:
             parts.append(name_hint)
         path = self.inbox / ("_".join(parts) + ".md")
 
         tags = meta.get("tags") or []
+        full_desc = _one_line(meta.get("title", ""), 500)
+        url = meta.get("url", "")
         lines = [
             "---",
-            f'title: {_yaml_escape(meta.get("title", ""))}',
-            f'source: {_yaml_escape(meta.get("url", ""))}',
+            f'title: {_yaml_escape(_one_line(meta.get("title", "")))}',
+            f'desc: {_yaml_escape(full_desc)}',
+            f'source: {_yaml_escape(url)}',
             f'platform: {meta.get("platform", "")}',
             f'video_id: {_yaml_escape(meta.get("video_id", ""))}',
             "tags: [" + ", ".join(_yaml_escape(t) for t in tags) + "]",
@@ -184,6 +205,11 @@ class Library:
             f'device: {_yaml_escape(meta.get("device", ""))}',
             f'transcribed_at: {time.strftime("%Y-%m-%d %H:%M:%S")}',
             "---",
+            "",
+            # 正文顶部放一行可点击链接：转写稿只有声音，画面得回原视频看。
+            f"🔗 [在抖音打开原视频]({url})",
+            "",
+            f"> {full_desc}" if full_desc else "",
             "",
             "## 转写稿",
             "",
@@ -396,6 +422,7 @@ async def ingest_one(url_text: str, lib: Library, model: str, force: bool) -> st
         return f"[fail] 链接无法识别 | {type(exc).__name__}: {str(exc)[:80]}"
 
     url, video_id = _resolve_video_id(url)
+    url = _clean_url(url)
 
     if video_id and not force:
         known = lib.known(video_id)
