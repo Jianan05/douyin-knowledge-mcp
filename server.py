@@ -1230,6 +1230,33 @@ def _normalize_for_echo(text: str) -> str:
     return _PUNCT_RE.sub("", text or "")
 
 
+# Whisper 在无人声 / 纯音乐视频上会吐训练数据里的字幕套话，跟内容毫无关系。
+# 这类假内容比空结果更坑：看着像转写成功，实际是噪声，而且会让"这条其实没
+# 转出东西"的判断失效（实测三条 20 字的「Thank you for watching.」正好卡在
+# 空判据的边界上，画面兜底没被触发）。
+_HALLUCINATION_RE = re.compile(
+    r"thank you for watching|thanks for watching|please subscribe"
+    r"|请不吝点赞\s*订阅\s*转发\s*打赏|字幕由.{0,12}提供|由.{0,10}字幕组"
+    r"|Amara\.org|谢谢观看|谢谢大家收看|明镜与点点栏目",
+    re.I,
+)
+
+
+def strip_hallucinated_boilerplate(text: str) -> str:
+    """删掉整行都是字幕套话的行。夹在真内容里的不动，跟 strip_prompt_echo 一个思路。"""
+    kept = []
+    for line in (text or "").splitlines():
+        stripped = _PUNCT_RE.sub("", line)
+        if not stripped:
+            kept.append(line)
+            continue
+        without = _HALLUCINATION_RE.sub("", line)
+        if len(_PUNCT_RE.sub("", without)) < len(stripped) * 0.4:
+            continue   # 剔完剩不到四成 = 整行都是套话
+        kept.append(line)
+    return "\n".join(kept).strip()
+
+
 def strip_prompt_echo(text: str, prompt: str) -> str:
     """
     去掉 Whisper 把 initial_prompt 当正文续写出来的部分。
@@ -1343,7 +1370,8 @@ def _transcribe_segments_sync(
 
     def attempt(active_model, use_vad: bool, use_prompt: bool) -> str:
         text = collect(*decode(active_model, use_vad=use_vad, use_prompt=use_prompt))
-        return strip_prompt_echo(text, prompt) if use_prompt else text.strip()
+        cleaned = strip_prompt_echo(text, prompt) if use_prompt else text.strip()
+        return strip_hallucinated_boilerplate(cleaned)
 
     def run(active_model) -> str:
         """
