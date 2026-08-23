@@ -421,7 +421,8 @@ def cmd_sync(lib: Library) -> int:
     return 0
 
 
-async def ingest_one(url_text: str, lib: Library, model: str, force: bool) -> str:
+async def ingest_one(url_text: str, lib: Library, model: str, force: bool,
+                     no_screen: bool = False) -> str:
     """处理一条链接，返回给 stdout 的那一行摘要（绝不包含转写稿正文）。"""
     try:
         url = server._extract_url(url_text)
@@ -462,6 +463,23 @@ async def ingest_one(url_text: str, lib: Library, model: str, force: bool) -> st
             return f"[fail] {video_id} | 转录失败 {type(exc).__name__}: {str(exc)[:80]}"
 
     title, tags = _split_tags(raw_title)
+
+    # 声音里没内容 → 去画面里找。多下一次视频流，几十秒，只对少数视频触发。
+    screen_note = ""
+    if not no_screen and platform == "douyin" and _looks_empty(transcript, duration):
+        try:
+            screen, cands = await read_screen_text(url, transcript)
+        except Exception as exc:
+            screen, cands = "", ""
+            screen_note = f"（画面识别失败：{type(exc).__name__}）"
+        if screen:
+            screen_note = "## 画面文字" + chr(10) * 2 + screen
+            if cands:
+                hint = "、".join(f"{w}({n}帧)" for w, n in cands[:5])
+                screen_note += chr(10) * 2 + f"> 画面里的英文候选：{hint}"
+    if screen_note:
+        transcript = (transcript.strip() + chr(10) * 2 + screen_note).strip()
+
     chars = len(transcript.replace("\n", "").replace(" ", ""))
     row_meta = {
         "title": title,
@@ -497,6 +515,27 @@ async def ingest_one(url_text: str, lib: Library, model: str, force: bool) -> st
         f"[ok] {video_id} | {title[:28]} | {_fmt_duration(duration)} | "
         f"{chars}字 | {tag_hint} | {time.time() - started:.0f}s | {path.name}"
     )
+
+
+def _looks_empty(transcript: str, duration: float) -> bool:
+    """转写稿相对时长少得离谱 = 这条视频的内容不在声音里，在画面上。
+
+    判据是全库 QC 扫出来的：每秒不到 1.5 字，或绝对字数 < 20。
+    典型场景：一张照片发成视频、纯演示无人声、纯 BGM 配字幕。
+    """
+    chars = len(transcript.replace("\n", "").replace(" ", ""))
+    return chars < 20 or (duration > 20 and chars < duration * 1.5)
+
+
+async def read_screen_text(url: str, transcript: str) -> tuple[str, list]:
+    """抽帧 OCR 兜底。返回 (画面文字, 英文候选名)。"""
+    import frames
+
+    with tempfile.TemporaryDirectory(prefix="frames_") as tmp:
+        # ⚠️ 必须 need="video"：转写那条路下的是纯音频，一帧也抽不出来
+        path = await server._download_douyin_media(url, tmp, need="video")
+        screen, words = await asyncio.to_thread(frames.read_screen, path)
+        return screen, frames.candidates(words, transcript)
 
 
 async def ingest_image_post(item: dict, lib: Library, force: bool) -> str:
@@ -586,7 +625,7 @@ async def cmd_collection(args, lib: Library, model: str) -> int:
             if item["is_image"]:
                 line = await ingest_image_post(item, lib, args.force)
             else:
-                line = await ingest_one(item["url"], lib, model, args.force)
+                line = await ingest_one(item["url"], lib, model, args.force, args.no_screen)
             print(line, flush=True)
             if line.startswith("[ok]") or line.startswith("[warn]") or line.startswith("[skip]"):
                 done_ids.append(item["aweme_id"])
@@ -647,7 +686,7 @@ async def main_async(args) -> int:
 
     ok = skipped = failed = 0
     for url in urls:
-        line = await ingest_one(url, lib, model, args.force)
+        line = await ingest_one(url, lib, model, args.force, args.no_screen)
         print(line, flush=True)
         if line.startswith("[ok]") or line.startswith("[warn]"):
             ok += 1
@@ -676,6 +715,8 @@ def main() -> int:
     parser.add_argument("--collections", action="store_true", help="列出所有抖音收藏夹")
     parser.add_argument("--dry-run", action="store_true", help="配合 --collection：只列清单，不转不删")
     parser.add_argument("--keep-collected", action="store_true", help="配合 --collection：转完不从收藏夹移除")
+    parser.add_argument("--no-screen", action="store_true",
+                        help="关掉画面兜底：默认转写稿相对时长过少时会抽帧 OCR 读画面")
     args = parser.parse_args()
     return asyncio.run(main_async(args))
 
