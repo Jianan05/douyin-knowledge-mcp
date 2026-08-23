@@ -1221,6 +1221,11 @@ def build_initial_prompt(terms: str = "") -> str:
 _PUNCT_RE = re.compile(r"[\s，。、；：！？,.;:!?\-—…·\"'（）()]+")
 
 
+# 拆 prompt 用的分隔符，和剔完残留的标点字符集（不用正则，省得转义踩坑）
+_PROMPT_SPLIT_RE = re.compile('[。，、：:；;]')
+_PUNCT_CHARS = ' 	，。、；：！？,.;:!?—…·'
+
+
 def _normalize_for_echo(text: str) -> str:
     return _PUNCT_RE.sub("", text or "")
 
@@ -1236,11 +1241,40 @@ def strip_prompt_echo(text: str, prompt: str) -> str:
     if not text or not prompt:
         return text
     needle = _normalize_for_echo(prompt)
+    # ⚠️ 必须按**短语**拆，不能按整句：Whisper 不只是原样复读，还会把 prompt
+    # 的几句话拆开重新拼（实测「内容可能涉及这些术语，请用简体中文转写。」——
+    # 两句混搭、冒号还变成了逗号）。按整句匹配的话这类一条都抓不到。
+    seeds = [x.strip() for x in re.split(_PROMPT_SPLIT_RE, prompt) if len(x.strip()) >= 5]
+    raw_fragments = sorted(set(seeds), key=len, reverse=True)
+    fragments = sorted(
+        {needle} | {_normalize_for_echo(x) for x in seeds if len(_normalize_for_echo(x)) >= 5},
+        key=len, reverse=True,  # 长的先剔，免得短片段把长的切碎
+    )
+
     kept = []
     for line in text.splitlines():
         norm = _normalize_for_echo(line)
         if len(norm) >= 6 and norm in needle:
             continue
+        # ⚠️ 关键：Whisper 会把 prompt **连着复读 N 遍**拼成一长行（实测一条 82 遍），
+        # 这时「整行 ⊂ prompt」不成立，只判 `norm in needle` 会整行放行。
+        # 379 条库里 28 条就是这么被污染的。
+        # 做法是**在原文里把复读片段剔掉、保留剩下的真话**，而不是整行丢弃 ——
+        # 见过「这个项目叫 XXX。」后面跟着一串复读的，整行删会把项目名一起删掉。
+        if norm:
+            cleaned = line
+            for frag in raw_fragments:
+                if frag:
+                    cleaned = cleaned.replace(frag, "")
+            if len(_normalize_for_echo(cleaned)) >= 6:
+                # 剔完开头常剩一串孤立标点，一并抹掉
+                kept.append(cleaned.strip().lstrip(_PUNCT_CHARS).strip())
+                continue
+            rest = norm
+            for frag in fragments:
+                rest = rest.replace(frag, "")
+            if len(rest) < len(norm) * 0.3:
+                continue  # 剔完剩不到三成 = 整行都是复读
         kept.append(line)
     return "\n".join(kept).strip()
 
@@ -1287,6 +1321,9 @@ def _transcribe_segments_sync(
             file_path,
             beam_size=5,
             vad_filter=use_vad,
+            # 复读的根源：默认会把上一段输出喂回去做条件，一旦开始复读 prompt
+            # 就停不下来（实测最坏的一条 31 分钟只转出 1113 字，其余全是复读）。
+            condition_on_previous_text=False,
             initial_prompt=build_initial_prompt(terms) if use_prompt else None,
             **extra,
         )
