@@ -31,6 +31,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+# 私有 runtime 的位置。run_web.bat / run_web.ps1 会设这两个变量，
+# 但命令行直接跑 ingest.py 时没人设 —— 不补的话 Playwright 会去
+# %LOCALAPPDATA% 找 chromium（找不到，一条都转不了），
+# HF 会把 whisper 模型重新下一份到 ~/.cache。外部已设值的照旧不覆盖。
+_RUNTIME = Path(__file__).resolve().parent / "runtime"
+os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", str(_RUNTIME / "ms-playwright"))
+os.environ.setdefault("HF_HOME", str(_RUNTIME / "huggingface"))
+
 import server
 
 # 默认库位置。⚠️ 别放 iCloudDrive：那边同步会把频繁写入的文件裂成冲突副本。
@@ -491,6 +499,114 @@ async def ingest_one(url_text: str, lib: Library, model: str, force: bool) -> st
     )
 
 
+async def ingest_image_post(item: dict, lib: Library, force: bool) -> str:
+    """图文帖：图片 OCR 成文字，走跟视频稿同一套 frontmatter 和目录。"""
+    import image_note
+
+    video_id = item.get("aweme_id") or ""
+    url = item.get("url") or ""
+    if video_id and not force:
+        known = lib.known(video_id)
+        if known:
+            return f"[skip] {video_id} | 已入库，跳过 | {known.get('path', '')}"
+
+    started = time.time()
+    images = item.get("images") or []
+    if not images:
+        return f"[fail] {video_id} | 图文没拿到图片地址"
+
+    try:
+        transcript, done = image_note.ocr_images(images)
+    except Exception as exc:
+        return f"[fail] {video_id} | OCR 失败 {type(exc).__name__}: {str(exc)[:80]}"
+
+    title, tags = _split_tags(item.get("desc") or "")
+    chars = len(transcript.replace(chr(10), "").replace(" ", ""))
+    row_meta = {
+        "title": title,
+        "url": url,
+        "platform": "douyin-图文",
+        "video_id": video_id,
+        "tags": tags,
+        "duration": 0,
+        "chars": chars,
+        "model": f"rapidocr({done}/{len(images)}张)",
+        "device": "CPU (OCR)",
+    }
+    retired = lib.retire(video_id) if force else ""
+    path = lib.write_note(row_meta, transcript)
+    lib.record({
+        "video_id": video_id,
+        "url": url,
+        "title": title,
+        "tags": tags,
+        "path": str(path),
+        "status": "raw",
+        "chars": chars,
+        "duration": 0,
+        "at": time.strftime("%Y-%m-%d %H:%M:%S"),
+    })
+    tag_hint = ("#" + " #".join(tags[:3])) if tags else "无标签"
+    if retired:
+        tag_hint += " (旧版已挪到 _已替换)"
+    return (
+        f"[ok] {video_id} | 图文 {title[:24]} | {done}/{len(images)}张 | "
+        f"{chars}字 | {tag_hint} | {time.time() - started:.0f}s | {path.name}"
+    )
+
+
+async def cmd_collection(args, lib: Library, model: str) -> int:
+    """把一个或多个收藏夹里的东西转成笔记，成功的从收藏夹里移除。"""
+    import douyin_collects as dc
+
+    total_ok = total_skip = total_fail = 0
+    done_ids: list[str] = []
+
+    for name in args.collection:
+        try:
+            info, items = await dc.fetch_collection(name)
+        except Exception as exc:
+            print(f"[fail] 收藏夹「{name}」：{exc}")
+            total_fail += 1
+            continue
+
+        videos = [i for i in items if not i["is_image"]]
+        images = [i for i in items if i["is_image"]]
+        print(f"收藏夹「{info['name']}」抓到 {len(items)}/{info['total']} 条"
+              f"（视频 {len(videos)}，图文 {len(images)}）")
+
+        if args.dry_run:
+            for i in items:
+                kind = "图文" if i["is_image"] else f"{i['duration_ms'] // 1000}s"
+                mark = "已入库" if lib.known(i["aweme_id"]) else "待转"
+                print(f"  [{mark}] {i['aweme_id']} {kind:>6}  {_one_line(i['desc'], 46)}")
+            continue
+
+        for item in items:
+            if item["is_image"]:
+                line = await ingest_image_post(item, lib, args.force)
+            else:
+                line = await ingest_one(item["url"], lib, model, args.force)
+            print(line, flush=True)
+            if line.startswith("[ok]") or line.startswith("[warn]") or line.startswith("[skip]"):
+                done_ids.append(item["aweme_id"])
+            if line.startswith("[ok]") or line.startswith("[warn]"):
+                total_ok += 1
+            elif line.startswith("[skip]"):
+                total_skip += 1
+            else:
+                total_fail += 1
+
+    if done_ids and not args.dry_run and not args.keep_collected:
+        # 只取消**确认入库**的，失败的原样留在收藏夹里等下次
+        removed, missed = await dc.uncollect(done_ids, args.collection[-1])
+        print(f"已从收藏夹移除 {removed} 条" + (f"，{missed} 条没移掉" if missed else ""))
+
+    print(f"完成：入库 {total_ok}，跳过 {total_skip}，失败 {total_fail}。"
+          f"待分类都在 {lib.inbox}")
+    return 0 if total_fail == 0 else 1
+
+
 def read_urls(args) -> list[str]:
     urls = list(args.urls)
     if args.file:
@@ -510,13 +626,23 @@ async def main_async(args) -> int:
     if args.classify:
         return cmd_classify(lib_only, args.apply)
 
+    if args.collections:
+        import douyin_collects as dc
+        for f in await dc.list_collections():
+            print(f"{f['total']:>5}  {f['name']}")
+        return 0
+
+    model = args.model or server.recommended_model()
+    if args.collection:
+        print(f"库 {lib_only.root} | 模型 {model} | 设备 {server.device_label()}")
+        return await cmd_collection(args, lib_only, model)
+
     urls = read_urls(args)
     if not urls:
         print("没有输入链接。用法：python ingest.py <链接> [更多链接...]")
         return 2
 
     lib = lib_only
-    model = args.model or server.recommended_model()
     print(f"库 {lib.root} | 模型 {model} | 设备 {server.device_label()} | 共 {len(urls)} 条")
 
     ok = skipped = failed = 0
@@ -545,6 +671,11 @@ def main() -> int:
     parser.add_argument("--sync", action="store_true", help="按 frontmatter 把文件归位并重建索引")
     parser.add_argument("--classify", action="store_true", help="按 categories.toml 预览分类结果")
     parser.add_argument("--apply", action="store_true", help="配合 --classify：把分类写进 frontmatter")
+    parser.add_argument("--collection", action="append", metavar="夹子名",
+                        help="转写这个抖音收藏夹里的内容，可重复；成功的会从收藏夹移除")
+    parser.add_argument("--collections", action="store_true", help="列出所有抖音收藏夹")
+    parser.add_argument("--dry-run", action="store_true", help="配合 --collection：只列清单，不转不删")
+    parser.add_argument("--keep-collected", action="store_true", help="配合 --collection：转完不从收藏夹移除")
     args = parser.parse_args()
     return asyncio.run(main_async(args))
 
