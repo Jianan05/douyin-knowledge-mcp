@@ -64,13 +64,28 @@ def grab_frames(path: str, every_sec: float = 2.5, cap: int = 80, diff_skip: boo
     return out
 
 
+def _is_garbage(text: str) -> bool:
+    """滤掉水印和装饰元素被误读出来的碎片。
+
+    实测捞出来的噪声长这样：fet、32弄、图一新113章1、Datet、�。
+    共同点是**很短，或者汉字/字母占比低**（夹着一堆数字和符号）。
+    真正的画面文字是成句的标题和字幕，这两条判据都过得去。
+    """
+    if "�" in text:
+        return True
+    real = sum(1 for ch in text if "一" <= ch <= "鿿" or ch.isalpha())
+    if len(text) <= 3 and real < len(text):
+        return True
+    return real < len(text) * 0.7
+
+
 def _ocr_frame(engine, frame) -> list[str]:
     result, _ = engine(frame)
     lines = []
     for line in result or []:
         if len(line) > 1:
             text = str(line[1]).strip()
-            if text and _MEANINGFUL.search(text):
+            if text and _MEANINGFUL.search(text) and not _is_garbage(text):
                 lines.append(text)
     return lines
 
