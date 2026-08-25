@@ -313,12 +313,17 @@ def set_front_matter_field(path: Path, key: str, value: str) -> None:
     path.write_text(head + sep + body, encoding="utf-8")
 
 
-def cmd_classify(lib: Library, apply: bool) -> int:
+def cmd_classify(lib: Library, apply: bool, recategorize: bool = False, brief: bool = False) -> int:
     """
     按 categories.toml 给还没分类的条目打上 category。
 
     默认只预览（--classify），确认没问题再加 --apply 落盘。
     分类只看标题和标签，**从不读转写稿正文**。
+
+    recategorize=True 时无视已有的 category 重算。改了规则表想让老条目
+    跟着走，必须加这个——默认是保留已有分类的，不然每次跑都会推翻人工调整。
+    brief=True 只打印每类的条数，不逐条列。库大了以后逐条列会刷屏，
+    而且如果是 AI 在跑，那一屏就是几万 token。
     """
     rules = load_rules()
     if not rules:
@@ -327,11 +332,18 @@ def cmd_classify(lib: Library, apply: bool) -> int:
 
     buckets: dict[str, list] = {}
     for path, meta in scan_library(lib):
-        category = (meta.get("category") or "").strip() or match_category(meta, rules)
+        existing = (meta.get("category") or "").strip()
+        category = match_category(meta, rules) if recategorize else (
+            existing or match_category(meta, rules)
+        )
         buckets.setdefault(category or "_待分类", []).append((path, meta, category))
 
-    for name in sorted(buckets, key=lambda k: (k == "_待分类", k)):
+    total = sum(len(v) for v in buckets.values())
+    for name in sorted(buckets, key=lambda k: (k == "_待分类", -len(buckets[k]))):
         items = buckets[name]
+        if brief:
+            print(f"{len(items):5d}  {len(items) * 100 // max(total, 1):2d}%  {name}")
+            continue
         print(f"\n{name}（{len(items)} 条）")
         for path, meta, _ in items:
             print(f"  {int(meta.get('chars') or 0):6d}字  {meta.get('title', '')[:34]}")
@@ -343,9 +355,16 @@ def cmd_classify(lib: Library, apply: bool) -> int:
     changed = 0
     for name, items in buckets.items():
         if name == "_待分类":
+            # 重算时没命中的，要把旧 category 清掉，否则文件会一直卡在
+            # 老目录里（改规则表后最容易漏的一步）。
+            if recategorize:
+                for path, meta, _ in items:
+                    if (meta.get("category") or "").strip():
+                        set_front_matter_field(path, "category", "")
+                        changed += 1
             continue
         for path, meta, category in items:
-            if category and (meta.get("category") or "").strip() != category:
+            if category and ((meta.get("category") or "").strip() != category):
                 set_front_matter_field(path, "category", category)
                 changed += 1
     print(f"\n已写入 {changed} 条的 category 字段。接着跑 --sync 把文件归位。")
@@ -663,7 +682,7 @@ async def main_async(args) -> int:
     if args.sync:
         return cmd_sync(lib_only)
     if args.classify:
-        return cmd_classify(lib_only, args.apply)
+        return cmd_classify(lib_only, args.apply, args.recategorize, args.brief)
 
     if args.collections:
         import douyin_collects as dc
@@ -710,6 +729,10 @@ def main() -> int:
     parser.add_argument("--sync", action="store_true", help="按 frontmatter 把文件归位并重建索引")
     parser.add_argument("--classify", action="store_true", help="按 categories.toml 预览分类结果")
     parser.add_argument("--apply", action="store_true", help="配合 --classify：把分类写进 frontmatter")
+    parser.add_argument("--recategorize", action="store_true",
+                        help="配合 --classify：无视已有 category 重算（改了规则表后用）")
+    parser.add_argument("--brief", action="store_true",
+                        help="配合 --classify：只打印每类条数，不逐条列（库大时必用）")
     parser.add_argument("--collection", action="append", metavar="夹子名",
                         help="转写这个抖音收藏夹里的内容，可重复；成功的会从收藏夹移除")
     parser.add_argument("--collections", action="store_true", help="列出所有抖音收藏夹")
