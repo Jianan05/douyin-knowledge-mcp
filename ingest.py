@@ -454,7 +454,16 @@ class Library:
         return seen
 
     def known(self, video_id: str) -> dict | None:
-        return self._seen.get(video_id)
+        row = self._seen.get(video_id)
+        if not row:
+            return None
+        raw_path = str(row.get("path") or "").strip()
+        if not raw_path:
+            return None
+        path = Path(raw_path).expanduser()
+        if not path.is_absolute():
+            path = self.root / path
+        return row if path.is_file() else None
 
     def retire(self, video_id: str) -> str:
         """--force 重转时，把同一视频的旧文件挪进 _已替换/，不直接删。"""
@@ -940,18 +949,28 @@ _RULES_DIR = Path(__file__).resolve().parent
 _PUBLIC_RULES_PATH = _RULES_DIR / "categories.toml"
 _LOCAL_RULES_PATH = _RULES_DIR / "categories.local.toml"
 _RULES_OVERRIDE = os.environ.get("DOUYIN_CATEGORIES_FILE", "").strip()
-RULES_PATH = (
-    Path(_RULES_OVERRIDE).expanduser()
-    if _RULES_OVERRIDE
-    else (_LOCAL_RULES_PATH if _LOCAL_RULES_PATH.is_file() else _PUBLIC_RULES_PATH)
-)
+
+
+def _resolve_rules_path(rules_dir: Path = _RULES_DIR, override: str | None = None) -> Path:
+    """Resolve rules with explicit override > local file > public defaults."""
+    selected_override = _RULES_OVERRIDE if override is None else override.strip()
+    if selected_override:
+        return Path(selected_override).expanduser()
+    local_path = rules_dir / "categories.local.toml"
+    return local_path if local_path.is_file() else rules_dir / "categories.toml"
+
+
+RULES_PATH = _resolve_rules_path()
 
 
 def load_rules(path: Path = RULES_PATH) -> list[dict]:
     """读分类规则表。顺序即优先级，第一条命中就定。"""
     if not path.is_file():
         return []
-    import tomllib
+    try:
+        import tomllib
+    except ModuleNotFoundError:  # Python 3.10
+        import tomli as tomllib
 
     with path.open("rb") as handle:
         data = tomllib.load(handle)
@@ -1212,6 +1231,7 @@ async def ingest_one(url_text: str, lib: Library, model: str, force: bool,
     screen_note = ""
     screen = ""
     cands: list[tuple[str, int]] = []
+    ocr_failed = False
     if not no_screen and platform == "douyin" and _looks_empty(transcript, duration):
         try:
             if progress:
@@ -1220,7 +1240,8 @@ async def ingest_one(url_text: str, lib: Library, model: str, force: bool,
                 url, transcript, download_lock=download_lock
             )
         except Exception as exc:
-            screen, cands = "", ""
+            screen, cands = "", []
+            ocr_failed = True
             screen_note = f"（画面识别失败：{type(exc).__name__}）"
         if screen:
             screen_note = "## 画面文字" + chr(10) * 2 + screen
@@ -1270,8 +1291,10 @@ async def ingest_one(url_text: str, lib: Library, model: str, force: bool,
     tag_hint = ("#" + " #".join(tags[:3])) if tags else "无标签"
     if retired:
         tag_hint += " (旧版已挪到 _已替换)"
-    if not transcript.strip():
-        return f"[warn] {video_id} | {title[:28]} | 无语音内容 | {path.name}"
+    if ocr_failed:
+        return f"[warn] {video_id} | {title[:28]} | 画面 OCR 失败，已保留收藏 | {path.name}"
+    if not timestamped_transcript.strip() and not screen.strip():
+        return f"[warn] {video_id} | {title[:28]} | 无语音且无有效 OCR，已保留收藏 | {path.name}"
     return (
         f"[ok] {video_id} | {title[:28]} | {_fmt_duration(duration)} | "
         f"{chars}字 | {tag_hint} | {time.time() - started:.0f}s | {path.name}"
@@ -1286,6 +1309,13 @@ def _looks_empty(transcript: str, duration: float) -> bool:
     """
     chars = len(transcript.replace("\n", "").replace(" ", ""))
     return chars < 20 or (duration > 20 and chars < duration * 1.5)
+
+
+def _has_effective_image_ocr(text: str) -> bool:
+    """Ignore generated headings/failure placeholders when deciding whether OCR found content."""
+    content = re.sub(r"(?m)^### 图 \d+\s*$", "", text or "")
+    content = re.sub(r"（(?:这张图没识别出文字|识别失败：[^）]+)）", "", content)
+    return bool(content.strip())
 
 
 async def read_screen_text(
@@ -1371,6 +1401,16 @@ async def ingest_image_post(
     tag_hint = ("#" + " #".join(tags[:3])) if tags else "无标签"
     if retired:
         tag_hint += " (旧版已挪到 _已替换)"
+    if done < len(images):
+        return (
+            f"[warn] {video_id} | 图文 {title[:24]} | OCR 仅完成 {done}/{len(images)} 张，"
+            f"已保留收藏 | {path.name}"
+        )
+    if not _has_effective_image_ocr(transcript):
+        return (
+            f"[warn] {video_id} | 图文 {title[:24]} | OCR 未提取到有效文字，"
+            f"已保留收藏 | {path.name}"
+        )
     return (
         f"[ok] {video_id} | 图文 {title[:24]} | {done}/{len(images)}张 | "
         f"{chars}字 | {tag_hint} | {time.time() - started:.0f}s | {path.name}"
@@ -1517,9 +1557,12 @@ async def _run_pending_uncollect(lib: Library, force_now: bool = False) -> int:
         return 0
 
     try:
-        _, current = await dc.fetch_favorites(allow_empty=True)
+        info, current = await dc.fetch_favorites(allow_empty=True)
     except Exception as exc:
         print(f"[fail] 无法在取消前重新清点收藏：{exc}")
+        return 1
+    if not info.get("complete"):
+        print("[fail] 取消前重新清点不完整；已保留队列且未取消任何收藏。")
         return 1
     current_ids = {i["aweme_id"] for i in current}
     queued = [r for r in queued if r["aweme_id"] in current_ids]
@@ -1680,8 +1723,10 @@ async def cmd_favorites(args, lib: Library, model: str) -> int:
                         await asyncio.sleep(delay)
                 print(line, flush=True)
                 progress.record(line, item_progress.key)
-                if line.startswith(("[ok]", "[warn]", "[skip]")):
-                    confirmed.append(item)
+                if line.startswith(("[ok]", "[skip]")):
+                    aid = item.get("aweme_id") or ""
+                    if aid and lib.known(aid):
+                        confirmed.append(item)
                 if line.startswith(("[ok]", "[warn]")):
                     ok += 1
                 elif line.startswith("[skip]"):
@@ -1697,7 +1742,7 @@ async def cmd_favorites(args, lib: Library, model: str) -> int:
         await queue.join()
         await asyncio.gather(*workers)
 
-        if confirmed and not args.keep_collected:
+        if confirmed and inventory_complete and not args.keep_collected:
             progress.stage("写入待取消收藏队列", force=True)
             queued = lib.queue_uncollect(confirmed)
             print(f"已写入待取消收藏队列 {len(queued)} 条：{lib.pending_uncollect_path}")

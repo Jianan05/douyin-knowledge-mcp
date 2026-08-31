@@ -7,6 +7,7 @@ numpy>=1.26
 pillow>=10
 opencv-python-headless>=4.9
 rapidocr-onnxruntime>=1.3
+tomli>=2; python_version < "3.11"
 
 # MCP server (server.py)
 mcp>=1.0,<2

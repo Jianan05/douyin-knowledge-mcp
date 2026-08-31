@@ -94,10 +94,10 @@ def _extract_url(text: str) -> str:
 
 def _detect_platform(url: str) -> str:
     """Return the supported site name for a URL."""
-    host = urlparse(url).netloc.lower()
-    if "douyin.com" in host or "iesdouyin.com" in host:
+    host = (urlparse(url).hostname or "").lower()
+    if any(host == root or host.endswith("." + root) for root in ("douyin.com", "iesdouyin.com")):
         return "douyin"
-    if "bilibili.com" in host or host.endswith("b23.tv"):
+    if any(host == root or host.endswith("." + root) for root in ("bilibili.com", "b23.tv")):
         return "bilibili"
     raise ValueError(f"暂不支持这个网站: {host or url}")
 
@@ -1364,7 +1364,7 @@ def _transcribe_segments_sync(
 
     on_segment: 可选回调，每解码完一段就调用一次，签名为
         on_segment(segment_end_seconds, total_audio_seconds, text_so_far)。
-        用于在 Web UI 里显示真实进度百分比和流式文字。faster-whisper 的
+        用于让 CLI/MCP 等进度回调调用方显示真实进度百分比和流式文字。faster-whisper 的
         segments 是惰性生成器，遍历它本身就是在做转录，所以回调能给出
         随转录推进的增量进度。
     """
@@ -1638,8 +1638,8 @@ async def analyze_douyin(url: str, model_size: str = WHISPER_MODEL) -> str:
 
     url: 抖音或 Bilibili 分享链接/分享文本（自动提取URL）。
          支持格式：
-           - 纯URL:  https://v.douyin.com/43Hxli09K70/
-           - 长URL:  https://www.douyin.com/video/7628423061288682112
+           - 纯URL:  https://v.douyin.com/xxxxxx/
+           - 长URL:  https://www.douyin.com/video/1234567890123456789
            - Bilibili: https://www.bilibili.com/video/BV...
            - 分享文本: "5.33 复制打开抖音... https://v.douyin.com/xxx/"，自动提取URL
     model_size: Whisper 模型大小，默认 "tiny"（快）。
@@ -1763,7 +1763,8 @@ async def douyin_to_text(url: str, model_size: str = WHISPER_MODEL) -> str:
     无法承受完整流程（25-90 秒）的同步调用。
 
     url: 抖音或 Bilibili 分享链接/分享文本（自动提取URL）。
-         支持: https://v.douyin.com/xxx/、https://www.douyin.com/video/xxx、
+         支持: https://v.douyin.com/xxxxxx/、
+               https://www.douyin.com/video/1234567890123456789、
                https://www.bilibili.com/video/BV... 或整段分享文本
     model_size: Whisper 模型，默认 "tiny"（快）。准度不够时改 "small"。
     """

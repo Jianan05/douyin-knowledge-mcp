@@ -51,3 +51,18 @@ htmlcov/
 # Local override
 .env
 categories.local.toml
+
+# Repository-local knowledge library output (exact top-level paths)
+/inbox/
+/notes/
+/_待分类/
+/_已替换/
+/_source_packages/
+/assets/
+/index.jsonl
+/_待取消收藏.jsonl
+/_转录进度.md
+/_失败记录.jsonl
+/_失败记录.md
+/_内容类型修正.jsonl
+/_审计隔离/

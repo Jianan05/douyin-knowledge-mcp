@@ -269,9 +269,9 @@ class DouyinSession:
             await self._shutdown()
             raise DouyinBrowserError(
                 STAGE_LOGIN,
-                f"无法启动专用浏览器（{type(exc).__name__}）",
-                "确认 runtime\\ms-playwright 里的 Chromium 完整，"
-                "或关闭已经打开的同一个 profile 窗口后重试",
+                f"无法启动 Playwright Chromium（{type(exc).__name__}）",
+                "先运行 playwright install chromium；若使用可选 runtime，确认其中的 "
+                "Chromium 完整，或关闭已经打开的同一个 profile 窗口后重试",
             ) from exc
         await self.context.add_init_script(_STEALTH_JS)
         return self

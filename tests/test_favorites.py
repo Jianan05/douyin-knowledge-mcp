@@ -467,7 +467,9 @@ class TextPostTests(unittest.TestCase):
     def test_inventory_excludes_known_items_from_eta(self):
         with tempfile.TemporaryDirectory() as tmp:
             lib = ingest.Library(Path(tmp))
-            lib.record({"video_id": "known", "url": "x"})
+            note = Path(tmp) / "inbox" / "known.md"
+            note.write_text("placeholder", encoding="utf-8")
+            lib.record({"video_id": "known", "url": "x", "path": str(note)})
             inv = ingest._favorite_inventory([
                 {"aweme_id": "known", "kind": "video", "duration_ms": 999999},
                 {"aweme_id": "new", "kind": "video", "duration_ms": 60000},
@@ -505,7 +507,9 @@ class VisualClassificationTests(unittest.TestCase):
     def test_calibration_selection_is_stratified_and_excludes_known(self):
         with tempfile.TemporaryDirectory() as tmp:
             lib = ingest.Library(Path(tmp))
-            lib.record({"video_id": "known", "url": "x"})
+            note = Path(tmp) / "inbox" / "known.md"
+            note.write_text("placeholder", encoding="utf-8")
+            lib.record({"video_id": "known", "url": "x", "path": str(note)})
             items = [
                 {"aweme_id": "known", "kind": "video", "desc": "AI视频", "duration_ms": 1},
                 {"aweme_id": "img", "kind": "image", "desc": "图文", "duration_ms": 0},

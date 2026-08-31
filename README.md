@@ -21,9 +21,9 @@
 这是一个「内容提取和入库层」，不包含独立 Web UI，也不自己实现向量数据库或问答界面。下游 RAG 系统可以消费：
 
 - `inbox/` 与 `notes/` 中的 Markdown。
-- `_source_packages/` 中的带时闳 JSON。
+- `_source_packages/` 中的带时间戳 JSON。
 - `assets/` 中的原始媒体、代表帧、联系表和 OCR。
-- `_index.jsonl` 中的去重与元数据索引。
+- `index.jsonl` 中的去重与元数据索引。
 
 ## 环境要求
 
@@ -109,7 +109,7 @@ python ingest.py --favorites --dry-run --brief
 python ingest.py --favorites --keep-collected
 ```
 
-如果不加 `--keep-collected`，只有确认成功写入本地库的作品才会进入待取消队列；失败和无法识别的作品会保留。预计超过 30 分钟的取消任务会自动延后。
+如果不加 `--keep-collected`，只有处理结果为成功或安全跳过，并且索引对应路径确实存在且为普通文件的作品，才会进入待取消队列。`[warn]`、失败、未知类型、无语音且无有效 OCR、OCR 失败或视觉价值不确定的作品都会保留；取消前还会重新完整清点收藏。预计超过 30 分钟的取消任务会自动延后。`--keep-collected` 始终只保存，不写入或执行取消队列。
 
 ```powershell
 python ingest.py --uncollect-pending
@@ -170,15 +170,17 @@ DouyinNotes/
 ├─ notes/                  # status=noted 后归位的笔记
 ├─ _source_packages/       # 时间戳转录和 OCR 来源 JSON
 ├─ assets/                 # 视觉校准的原始媒体与代表帧
-├─ _index.jsonl            # 去重与元数据索引
-├─ _转录进度.md          # 只含进度，不含转录正文
-├─ _失败清单.md          # 结构化失败记录
-└─ _待取消收藏.jsonl  # 已入库作品的待处理队列
+├─ index.jsonl             # 去重与元数据索引
+├─ _转录进度.md           # 只含进度，不含转录正文
+├─ _失败记录.jsonl        # 机器可读失败事件
+├─ _失败记录.md           # 便于人工查看的失败摘要
+└─ _待取消收藏.jsonl      # 已安全入库作品的待处理队列
 ```
 
 ## 安全与隐私
 
-- `data/` 中的登录 profile/Cookie、`runtime/`、模型、转录稿、下载媒体、审计产物和隔离内容均被 Git 忽略。
+- 仓库内的 `data/`、`runtime/`、模型缓存和库产物目录均被 Git 忽略；这可防止敏感运行数据误提交。
+- 默认的外部 `~/Desktop/DouyinNotes` 不属于本仓库，仍不得另行公开其中的收藏元数据、转录正文、媒体、审计产物或隔离内容。
 - 不要关闭 HTTPS 证书验证，不要把 Cookie 或浏览器 profile 提交到仓库。
 - 项目只处理你有权访问和保存的内容；公开代码时不要一并公开收藏作品、转录正文或视频文件。
 - 取消收藏是有状态操作；先用 `--dry-run` 和 `--keep-collected` 验证流程。
