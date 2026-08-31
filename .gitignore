@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+env/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# 私有运行时（Python / Playwright 浏览器 / HuggingFace 模型缓存）
+runtime/
+
+# 敏感本地数据：浏览器 profile、Cookie、登录态
+data/
+*.cookies
+*cookies*.txt
+*cookies*.json
+storage_state.json
+
+# Whisper model cache (large)
+models/
+*.bin
+
+# Local downloads / temp output
+downloads/
+transcripts/
+audit/
+quarantine/
+*.mp4
+*.wav
+*.m4a
+*.m3u8
+*.pid
+*.lock
+tmp/
+
+# Test / coverage output
+.pytest_cache/
+.coverage
+htmlcov/
+
+# 安装日志 / 运行日志
+*.log
+
+# Local override
+.env
+categories.local.toml

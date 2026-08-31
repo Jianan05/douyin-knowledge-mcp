@@ -1,0 +1,6 @@
+# Optional NVIDIA CUDA runtime libraries for faster-whisper on Windows.
+# server.py adds their bin directories to the DLL search path and falls back
+# to CPU automatically when CUDA is unavailable.
+-r requirements.txt
+nvidia-cublas-cu12
+nvidia-cudnn-cu12>=9,<10

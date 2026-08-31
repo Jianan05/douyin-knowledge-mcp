@@ -1,0 +1,35 @@
+# Public example category rules.
+#
+# Rules are evaluated from top to bottom; the first match wins.
+# Copy this file to categories.local.toml to maintain private,
+# personalized rules without committing them to Git.
+
+[[rule]]
+name = "AI与软件"
+desc = "人工智能、编程、软件工具和技术原理"
+tags = ["AI", "人工智能", "编程", "软件", "大模型", "Agent", "RAG"]
+keywords = ["人工智能", "编程", "软件", "大模型", "Agent", "RAG", "开发工具"]
+
+[[rule]]
+name = "职业与学习"
+desc = "求职、面试、教育和学习方法"
+tags = ["求职", "面试", "学习", "教育", "职场"]
+keywords = ["求职", "面试", "学习方法", "课程", "职场", "简历"]
+
+[[rule]]
+name = "商业与金融"
+desc = "商业、经济、金融和投资"
+tags = ["商业", "经济", "金融", "投资", "财经"]
+keywords = ["商业", "经济", "金融", "投资", "市场", "公司"]
+
+[[rule]]
+name = "社会与文化"
+desc = "社会现象、历史、文化和公共议题"
+tags = ["社会", "文化", "历史", "公共议题"]
+keywords = ["社会", "文化", "历史", "人口", "公共议题"]
+
+[[rule]]
+name = "生活与兴趣"
+desc = "生活方式、娱乐和其他个人兴趣"
+tags = ["生活", "娱乐", "兴趣", "日常"]
+keywords = ["生活", "娱乐", "兴趣", "日常"]
