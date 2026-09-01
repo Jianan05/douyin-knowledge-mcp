@@ -78,7 +78,7 @@ class NormalizeFavoriteTests(unittest.TestCase):
             {"aweme_list": [{
                 "aweme_id": "all", "desc": "纯文字", "is_ads": True,
                 "collect_stat": 0, "author": {"uid": "author-1"},
-            }]},
+            }], "cursor": 123, "has_more": 1, "invalid_item_count": 7},
         )))
         asyncio.run(collector._on_response(Response(
             "https://www.douyin.com/aweme/v1/web/collects/video/list/?collects_id=folder",
@@ -86,6 +86,9 @@ class NormalizeFavoriteTests(unittest.TestCase):
         )))
 
         self.assertTrue(collector.saw_all_feed)
+        self.assertEqual(collector.all_cursor, 123)
+        self.assertEqual(collector.all_invalid_item_count, 7)
+        self.assertEqual(collector.all_raw_item_count, 1)
         self.assertEqual(set(collector.bucket(dc.ALL_FAVORITES)), {"all"})
         self.assertEqual(set(collector.bucket("folder")), {"folder-item"})
         row = collector.bucket(dc.ALL_FAVORITES)["all"]
@@ -282,6 +285,10 @@ class TranscriptionProgressTests(unittest.TestCase):
             self.assertFalse(lib.pending_uncollect_path.exists())
             status = lib.progress_path.read_text(encoding="utf-8")
             self.assertIn("清点未到底；只保存、不取消收藏", status)
+            self.assertIn(
+                "状态：**完成（当前稳定可见部分，清点未到底）**", status
+            )
+            self.assertNotIn("状态：**完成**", status)
 
     def test_favorites_pipeline_runs_up_to_four_items_concurrently(self):
         with tempfile.TemporaryDirectory() as tmp:

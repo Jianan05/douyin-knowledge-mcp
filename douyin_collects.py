@@ -15,8 +15,15 @@ from douyin_browser import DouyinSession, DouyinBrowserError, STAGE_LOGIN
 FAVORITE_URL = "https://www.douyin.com/user/self?showTab=favorite_collection"
 ALL_FAVORITES = "__all_favorites__"
 
-_SCROLL_ALL_JS = """() => {
+_SCROLL_ALL_JS = """async () => {
     const all = Array.from(document.querySelectorAll('*'));
+    for (const el of all) {
+        if (el.scrollHeight > el.clientHeight + 40) {
+            el.scrollTop = Math.max(0, el.scrollHeight - el.clientHeight - 800);
+        }
+    }
+    window.scrollBy(0, -800);
+    await new Promise(resolve => setTimeout(resolve, 80));
     for (const el of all) {
         if (el.scrollHeight > el.clientHeight + 40) {
             el.scrollTop = el.scrollHeight;
@@ -101,6 +108,9 @@ class _Collector:
         self.last_has_more = 1
         self.saw_all_feed = False
         self.all_has_more: int | None = None
+        self.all_cursor: int | str | None = None
+        self.all_invalid_item_count = 0
+        self.all_raw_item_count = 0
         self.all_feed_responses = 0
         self.ignored_liked: dict[str, dict] = {}
 
@@ -109,6 +119,45 @@ class _Collector:
 
     def attach(self, page):
         page.on("response", self._on_response)
+
+    def _add_aweme_items(
+        self, body: dict, path: str, bucket_key: str, source_url: str
+    ) -> None:
+        bucket = self.bucket(bucket_key)
+        for it in body.get("aweme_list") or []:
+            row = _normalize(it)
+            if row["aweme_id"]:
+                # 下划线字段只用于诊断，不会写进转录稿或 index.jsonl。
+                row["_source_path"] = path
+                row["_source_url"] = source_url
+                row["_is_ads"] = bool(it.get("is_ads"))
+                row["_collect_stat"] = it.get("collect_stat")
+                row["_user_digged"] = it.get("user_digged")
+                row["_author_uid"] = str((it.get("author") or {}).get("uid") or "")
+                bucket[row["aweme_id"]] = row
+
+    def ingest_all_payload(self, body: dict, source_url: str = "") -> None:
+        """统一吸收一页“全部收藏”响应及其分页元数据。"""
+        if body.get("aweme_list") is None:
+            return
+        self.saw_all_feed = True
+        self.all_feed_responses += 1
+        if "has_more" in body:
+            self.all_has_more = int(bool(body.get("has_more")))
+        for cursor_key in ("cursor", "max_cursor", "min_cursor", "offset"):
+            if cursor_key in body:
+                self.all_cursor = body.get(cursor_key)
+                break
+        try:
+            self.all_invalid_item_count = max(
+                self.all_invalid_item_count,
+                int(body.get("invalid_item_count") or 0),
+            )
+        except (TypeError, ValueError):
+            pass
+        self.all_raw_item_count += len(body.get("aweme_list") or [])
+        self._add_aweme_items(body, _ALL_PATH, ALL_FAVORITES, source_url)
+        self.last_has_more = body.get("has_more", 0)
 
     async def _on_response(self, resp):
         path = urlparse(resp.url).path
@@ -140,28 +189,15 @@ class _Collector:
             got = (parse_qs(urlparse(resp.url).query).get("collects_id") or [""])[0]
             # 指定收藏夹接口必须继续按 collects_id 分桶；其它收藏接口属于
             # “收藏”总列表。这样不会把收藏夹网格预加载的封面混进总列表。
-            bucket = self.bucket(got if path == _ITEM_PATH else ALL_FAVORITES)
             if path == _ALL_PATH:
-                self.saw_all_feed = True
-                self.all_feed_responses += 1
-                if "has_more" in body:
-                    self.all_has_more = int(bool(body.get("has_more")))
-            for it in body.get("aweme_list") or []:
-                row = _normalize(it)
-                if row["aweme_id"]:
-                    # 保留轻量来源证据，用于排查收藏流中是否混入广告/推荐。
-                    # 下划线字段不会写进转录稿或 index.jsonl。
-                    row["_source_path"] = path
-                    row["_source_url"] = resp.url
-                    row["_is_ads"] = bool(it.get("is_ads"))
-                    row["_collect_stat"] = it.get("collect_stat")
-                    row["_user_digged"] = it.get("user_digged")
-                    row["_author_uid"] = str(
-                        (it.get("author") or {}).get("uid") or ""
-                    )
-                    bucket[row["aweme_id"]] = row
-            self.last_has_more = body.get("has_more", 0)
-
+                self.ingest_all_payload(body, resp.url)
+            else:
+                self._add_aweme_items(
+                    body, path,
+                    got if path == _ITEM_PATH else ALL_FAVORITES,
+                    resp.url,
+                )
+                self.last_has_more = body.get("has_more", 0)
 
 _CLICK_TEXT_JS = """(wanted) => {
     const els = Array.from(document.querySelectorAll('span,div,a,p'));
@@ -244,20 +280,42 @@ async def fetch_favorites(
 
         bucket = collector.bucket(ALL_FAVORITES)
         stale = 0
+        seen_cursors: set[str] = set()
         for _ in range(max_scroll):
             before = len(bucket)
+            before_responses = collector.all_feed_responses
+            # 轻微上移再到底，让底部观察器在“本页只有无效占位、DOM 没变”
+            # 时也能再次进入视口，由网页生成下一份合法签名请求。
             await page.evaluate(_SCROLL_ALL_JS)
             await page.mouse.wheel(0, 2500)
-            # 大收藏库有上百页。固定每页等 1.8 秒会把清点拖到几十分钟；
-            # 改成一收到新一页响应就继续，只有没响应时才最多等 2.4 秒。
             for _wait in range(12):
                 await page.wait_for_timeout(200)
-                if len(bucket) > before or collector.all_has_more == 0:
+                if (
+                    len(bucket) > before
+                    or collector.all_feed_responses > before_responses
+                    or collector.all_has_more == 0
+                ):
                     break
-            stale = stale + 1 if len(bucket) == before else 0
+            cursor = (
+                str(collector.all_cursor)
+                if collector.all_cursor is not None
+                else ""
+            )
+            cursor_advanced = bool(cursor) and cursor not in seen_cursors
+            if cursor:
+                seen_cursors.add(cursor)
+            # 收到一页新响应本身就是进度；无效页可能不新增作品或改变游标。
+            response_advanced = collector.all_feed_responses > before_responses
+            progressed = len(bucket) > before or cursor_advanced or response_advanced
+            stale = 0 if progressed else stale + 1
             if collector.all_has_more == 0:
                 break
-            if stale >= stale_limit:
+            effective_stale_limit = (
+                max(stale_limit, 120)
+                if collector.all_invalid_item_count
+                else stale_limit
+            )
+            if stale >= effective_stale_limit:
                 break
 
         title = await page.title()
@@ -283,6 +341,9 @@ async def fetch_favorites(
             "responses": collector.all_feed_responses,
             "has_more": collector.all_has_more,
             "complete": collector.all_has_more == 0,
+            "cursor": collector.all_cursor,
+            "invalid_item_count": collector.all_invalid_item_count,
+            "raw_item_count": collector.all_raw_item_count,
             "ignored_liked": list(collector.ignored_liked.values()),
         }, items
 

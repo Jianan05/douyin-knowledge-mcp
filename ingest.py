@@ -1612,6 +1612,14 @@ async def cmd_favorites(args, lib: Library, model: str) -> int:
     items = [lib.apply_type_override(item) for item in items]
 
     inventory_complete = bool(info.get("complete"))
+    invalid_item_count = int(info.get("invalid_item_count") or 0)
+    if invalid_item_count:
+        print(
+            f"[info] 抖音接口单次响应最多报告 {invalid_item_count} 条无效收藏记录；"
+            "该字段不一定是累计总数。这些记录可能对应作者隐藏、删除或当前账号"
+            "不可见的作品，未计入可处理清单。",
+            flush=True,
+        )
     if not inventory_complete:
         print(
             f"[warn] 抖音仍返回 has_more=1；先处理当前稳定可见的 {len(items)} 条。"
@@ -1749,7 +1757,13 @@ async def cmd_favorites(args, lib: Library, model: str) -> int:
             progress.stage("处理待取消收藏队列", force=True)
             await _run_pending_uncollect(lib, force_now=args.force_uncollect)
 
-        progress.finish("完成" if failed == 0 else f"完成（{failed} 条失败）")
+        if failed:
+            final_status = f"完成（{failed} 条失败）"
+        elif inventory_complete:
+            final_status = "完成"
+        else:
+            final_status = "完成（当前稳定可见部分，清点未到底）"
+        progress.finish(final_status)
     except BaseException:
         progress.finish("中断")
         raise
