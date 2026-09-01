@@ -1,40 +1,61 @@
-# 抖音链接 → 本地转录 → 分类入库
+# Douyin Knowledge Ingest — Agent Instructions
 
-给 AI 助手看的操作说明。人看的完整文档在 README.md。
+本项目是面向 Codex、MCP 和下游 RAG 的命令行内容采集工具，不包含独立 Web UI。
 
-## 用户说「把这些抖音链接入库」时，跑这个
+## 常用工作流
 
-```bash
-cd C:\Users\qjn15\Desktop\douyin-transcribe
-.\runtime\python\python.exe ingest.py <链接1> <链接2> ...
+处理链接：
+
+```powershell
+.\runtime\python\python.exe ingest.py <链接1> <链接2>
 .\runtime\python\python.exe ingest.py --classify --apply
 .\runtime\python\python.exe ingest.py --sync
 ```
 
-链接可以直接粘抖音的整段分享文本，脚本自己提取 URL。已入库的按 video_id 自动跳过。
+链接可以是 URL 或抖音 App 的整段分享文本。已入库作品按 video_id 自动跳过。
 
-## ⛔ 最重要的一条：转写稿不要读进上下文
+处理收藏前先只读清点：
 
-一条 5 分钟视频约 2000 字。**除非用户明确说「这条我要看/要笔记」，
-否则不要 cat 转写稿正文**，只看脚本回显的那一行摘要就够了。
-这是这套工具存在的全部意义——把内容留在磁盘上，不在对话里烧 token。
+```powershell
+.\runtime\python\python.exe ingest.py --favorites --dry-run --brief
+```
 
-## 其它命令
+首次正式处理建议保留收藏：
 
-- `ingest.py --list` 看全库有什么、哪些还没写笔记（不打印正文）
-- `ingest.py --classify` 只预览分类结果，不落盘
-- `ingest.py --force <链接>` 无视去重重转，旧文件挪进 `_已替换/`
+```powershell
+.\runtime\python\python.exe ingest.py --favorites --keep-collected
+```
 
-## 库在哪
+## 收藏内容处理原则
 
-`C:\Users\qjn15\Desktop\DouyinNotes\`
-- `inbox/<分类>/` 转好了、还没写笔记
-- `notes/<分类>/` 写完笔记的（把 frontmatter 的 status 改成 noted，再跑 --sync 自动归位）
-- 分类规则在本项目的 `categories.toml`，顺序即优先级，第一条命中就定
+- 区分视频、图文、纯文字和未知类型，不要一律当作音频转录。
+- 口播内容保存转录稿，并在语音信息不足时使用画面 OCR 补充。
+- 图文内容保留 OCR；视觉校准流程还应保存原图或原视频、代表帧和联系表。
+- 只有处理结果为 `[ok]` 或安全的 `[skip]`，并且索引对应路径真实存在且为普通文件的作品，才能进入待取消收藏队列。
+- `[warn]`、失败、无法识别、未知类型、OCR 不完整或视觉价值不确定的作品必须保留收藏。
+- 取消收藏预计超过 30 分钟时，先保存待取消队列，不阻塞入库。
 
-## 硬约束
+## 上下文纪律
 
-- ⛔ 不要 `git push`：这仓库故意没配远程，只做本地存档
-- ⛔ 不要关 HTTPS 校验，不要把 Cookie 写进日志
-- ⛔ 不要动 `data/`（抖音登录态）和 `runtime/`（私有 Python / 浏览器 / 模型）
-- ⛔ 不要改 `C:\Users\qjn15\Desktop\opp`
+除非用户明确要求查看、总结或整理某条内容，否则不要读取转录稿正文进入对话上下文。日常批处理只查看命令回显、元数据、状态和错误摘要。
+
+## 本地库
+
+默认库目录是 `~/Desktop/DouyinNotes`，可以用 `--dir` 指定其他位置。
+
+- `inbox/`：已提取、待整理内容
+- `notes/`：完成整理的笔记
+- `_source_packages/`：带时间戳的机器可读来源包
+- `assets/`：视觉校准资产
+- `index.jsonl`：去重与元数据索引
+- `_失败记录.jsonl`：机器可读失败事件
+- `_失败记录.md`：便于人工查看的失败摘要
+
+## 安全约束
+
+- 不要读取、提交或修改 `data/` 中的登录 profile 和 Cookie。
+- 不要提交或修改 `runtime/` 中的私有运行时、浏览器和模型缓存。
+- 不要关闭 HTTPS 证书验证，也不要把 Cookie 写入日志或错误信息。
+- 使用 `--audit-apply` 前先运行只读审计并检查报告。
+- 未经用户明确要求，不要执行 `git push`。
+- 不要修改用户未放入任务范围的其他项目或知识库。
