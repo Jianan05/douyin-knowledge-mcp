@@ -13,6 +13,7 @@ from urllib.parse import parse_qs, urlparse
 from douyin_browser import DouyinSession, DouyinBrowserError, STAGE_LOGIN
 
 FAVORITE_URL = "https://www.douyin.com/user/self?showTab=favorite_collection"
+ALL_FAVORITES = "__all_favorites__"
 
 _SCROLL_ALL_JS = """() => {
     const all = Array.from(document.querySelectorAll('*'));
@@ -26,6 +27,27 @@ _SCROLL_ALL_JS = """() => {
 
 _LIST_PATH = "/aweme/v1/web/collects/list/"
 _ITEM_PATH = "/aweme/v1/web/collects/video/list/"
+_ALL_PATH = "/aweme/v1/web/aweme/listcollection/"
+_LIKED_PATH = "/aweme/v1/web/aweme/favorite/"
+
+
+def _post_kind(item: dict) -> str:
+    """把收藏作品分成 video / image / text。
+
+    纯文字帖没有稳定的 aweme_type；用“没有视频、没有图片、但有正文”兜底，
+    比把所有未知类型都硬塞给 Whisper 安全。
+    """
+    if _is_image_post(item):
+        return "image"
+    video = item.get("video") or {}
+    has_video = bool(
+        video.get("play_addr") or video.get("bit_rate") or video.get("duration")
+    )
+    if has_video:
+        return "video"
+    if (item.get("desc") or "").strip():
+        return "text"
+    return "unknown"
 
 
 def _is_image_post(item: dict) -> bool:
@@ -46,13 +68,23 @@ def _image_urls(item: dict) -> list[str]:
 
 def _normalize(item: dict) -> dict:
     video = item.get("video") or {}
+    aweme_id = str(item.get("aweme_id") or "")
+    kind = _post_kind(item)
+    # 接口里的 iesdouyin 分享链接带临时签名和设备参数，过期后可能跳进推荐流，
+    # 让“在抖音打开”显示成另一条作品。入库只保存由作品 ID 构造的稳定地址。
+    route = "video" if kind == "video" else "note"
+    share_url = f"https://www.douyin.com/{route}/{aweme_id}"
     return {
-        "aweme_id": item.get("aweme_id") or "",
+        "aweme_id": aweme_id,
         "desc": (item.get("desc") or "").strip(),
-        "is_image": _is_image_post(item),
+        "kind": kind,
+        "is_image": kind == "image",  # 兼容旧调用方
         "duration_ms": video.get("duration") or 0,
+        # 只在本轮内存队列中使用，不会写进笔记或 index。收藏接口给出的 video
+        # 与 aweme_id 属于同一个对象，比重新打开会预载推荐流的作品页更可靠。
+        "_video": video,
         "images": _image_urls(item),
-        "url": f"https://www.douyin.com/video/{item.get('aweme_id')}",
+        "url": share_url,
     }
 
 
@@ -67,6 +99,10 @@ class _Collector:
         self.folders: dict[str, dict] = {}
         self.buckets: dict[str, dict[str, dict]] = {}
         self.last_has_more = 1
+        self.saw_all_feed = False
+        self.all_has_more: int | None = None
+        self.all_feed_responses = 0
+        self.ignored_liked: dict[str, dict] = {}
 
     def bucket(self, collects_id: str) -> dict[str, dict]:
         return self.buckets.setdefault(str(collects_id), {})
@@ -76,11 +112,20 @@ class _Collector:
 
     async def _on_response(self, resp):
         path = urlparse(resp.url).path
-        if path not in (_LIST_PATH, _ITEM_PATH):
+        # 只有 listcollection 是“收藏作品”总列表。
+        # /aweme/favorite/ 虽然名字像收藏，实际返回“点赞”作品；
+        # 它的 collect_stat=0, user_digged=1，绝对不能混入本地收藏库。
+        if path not in (_LIST_PATH, _ITEM_PATH, _ALL_PATH, _LIKED_PATH):
             return
         try:
             body = await resp.json()
         except Exception:
+            return
+        if path == _LIKED_PATH:
+            for it in body.get("aweme_list") or []:
+                row = _normalize(it)
+                if row["aweme_id"]:
+                    self.ignored_liked[row["aweme_id"]] = row
             return
         if path == _LIST_PATH:
             for f in body.get("collects_list") or []:
@@ -91,12 +136,29 @@ class _Collector:
                         "name": f.get("collects_name") or "",
                         "total": f.get("total_number") or 0,
                     }
-        else:
+        elif body.get("aweme_list") is not None:
             got = (parse_qs(urlparse(resp.url).query).get("collects_id") or [""])[0]
-            bucket = self.bucket(got)
+            # 指定收藏夹接口必须继续按 collects_id 分桶；其它收藏接口属于
+            # “收藏”总列表。这样不会把收藏夹网格预加载的封面混进总列表。
+            bucket = self.bucket(got if path == _ITEM_PATH else ALL_FAVORITES)
+            if path == _ALL_PATH:
+                self.saw_all_feed = True
+                self.all_feed_responses += 1
+                if "has_more" in body:
+                    self.all_has_more = int(bool(body.get("has_more")))
             for it in body.get("aweme_list") or []:
                 row = _normalize(it)
                 if row["aweme_id"]:
+                    # 保留轻量来源证据，用于排查收藏流中是否混入广告/推荐。
+                    # 下划线字段不会写进转录稿或 index.jsonl。
+                    row["_source_path"] = path
+                    row["_source_url"] = resp.url
+                    row["_is_ads"] = bool(it.get("is_ads"))
+                    row["_collect_stat"] = it.get("collect_stat")
+                    row["_user_digged"] = it.get("user_digged")
+                    row["_author_uid"] = str(
+                        (it.get("author") or {}).get("uid") or ""
+                    )
                     bucket[row["aweme_id"]] = row
             self.last_has_more = body.get("has_more", 0)
 
@@ -164,6 +226,67 @@ async def list_collections() -> list[dict]:
         return sorted(collector.folders.values(), key=lambda f: -f["total"])
 
 
+async def fetch_favorites(
+    max_scroll: int = 1000, allow_empty: bool = False, require_exhausted: bool = True,
+    stale_limit: int = 20,
+) -> tuple[dict, list[dict]]:
+    """滚完“收藏”总列表，返回全部视频、图文和纯文字作品。
+
+    只接受 listcollection 总列表接口；不能按 URL 里是否含
+    favorite/collect 模糊判断，因为 /aweme/favorite/ 实际是点赞列表。
+    """
+    async with DouyinSession(headless=True) as session:
+        page = await session.context.new_page()
+        collector = _Collector()
+        collector.attach(page)
+        await page.goto(FAVORITE_URL, wait_until="domcontentloaded")
+        await page.wait_for_timeout(7000)
+
+        bucket = collector.bucket(ALL_FAVORITES)
+        stale = 0
+        for _ in range(max_scroll):
+            before = len(bucket)
+            await page.evaluate(_SCROLL_ALL_JS)
+            await page.mouse.wheel(0, 2500)
+            # 大收藏库有上百页。固定每页等 1.8 秒会把清点拖到几十分钟；
+            # 改成一收到新一页响应就继续，只有没响应时才最多等 2.4 秒。
+            for _wait in range(12):
+                await page.wait_for_timeout(200)
+                if len(bucket) > before or collector.all_has_more == 0:
+                    break
+            stale = stale + 1 if len(bucket) == before else 0
+            if collector.all_has_more == 0:
+                break
+            if stale >= stale_limit:
+                break
+
+        title = await page.title()
+        await page.close()
+        if not collector.saw_all_feed or (not bucket and not allow_empty):
+            raise DouyinBrowserError(
+                STAGE_LOGIN,
+                "收藏总列表没有抓到任何作品",
+                "确认已登录且收藏不为空；若页面能看到作品，说明抖音改了收藏接口",
+            )
+        if collector.all_has_more == 1 and require_exhausted:
+            raise DouyinBrowserError(
+                STAGE_LOGIN,
+                f"收藏只加载到 {len(bucket)} 条，抖音仍返回 has_more=1",
+                "本次清点不完整，已拒绝继续处理；稍后重试或检查页面滚动结构",
+            )
+        items = list(bucket.values())
+        return {
+            "id": ALL_FAVORITES,
+            "name": "全部收藏",
+            "total": len(items),
+            "page": title,
+            "responses": collector.all_feed_responses,
+            "has_more": collector.all_has_more,
+            "complete": collector.all_has_more == 0,
+            "ignored_liked": list(collector.ignored_liked.values()),
+        }, items
+
+
 async def fetch_collection(name: str, max_scroll: int = 80) -> tuple[dict, list[dict]]:
     """打开指定名字的收藏夹，滚到底，返回 (夹子信息, 条目列表)。"""
     async with DouyinSession(headless=True) as session:
@@ -209,13 +332,14 @@ async def fetch_collection(name: str, max_scroll: int = 80) -> tuple[dict, list[
 _COLLECT_BTN = '[data-e2e="video-player-collect"]'
 
 
-async def _click_collect(page, aweme_id: str) -> bool:
+async def _click_collect(page, aweme_id: str, url: str = "") -> bool:
     """打开视频页，点收藏按钮把它取消掉。
 
     ⚠️ 必须用 JS 直接 .click()：Playwright 的 page.click 会卡在可操作性检查上
     （元素被播放器盖住，实测必 timeout）。force=True 也不行。
     """
-    await page.goto(f"https://www.douyin.com/video/{aweme_id}", wait_until="domcontentloaded")
+    target = url or f"https://www.douyin.com/video/{aweme_id}"
+    await page.goto(target, wait_until="domcontentloaded")
     await page.wait_for_timeout(6000)
     try:
         await page.eval_on_selector(_COLLECT_BTN, "e => e.click()")
@@ -225,30 +349,50 @@ async def _click_collect(page, aweme_id: str) -> bool:
     return True
 
 
-async def uncollect(aweme_ids: list[str], collection_name: str = "") -> tuple[int, int]:
-    """批量取消收藏，返回 (确认移除数, 没移掉数)。
+async def uncollect_items(
+    items: list[dict], collection_name: str = "",
+) -> tuple[list[str], list[str]]:
+    """批量取消收藏，返回（确认移除 ID，仍在收藏 ID）。
 
     不信按钮的 class 状态（混淆类名，点完 DOM 还会重渲染）——
     点完之后**重新翻一遍夹子**，以夹子里还剩什么为准。这是唯一靠得住的验证。
     """
-    if not aweme_ids:
-        return 0, 0
+    rows = [i for i in items if i.get("aweme_id")]
+    aweme_ids = [i["aweme_id"] for i in rows]
+    if not rows:
+        return [], []
     async with DouyinSession(headless=True) as session:
         page = await session.context.new_page()
-        for aid in aweme_ids:
+        for item in rows:
+            aid = item["aweme_id"]
             try:
-                await _click_collect(page, aid)
+                await _click_collect(page, aid, item.get("url") or "")
             except Exception:
                 pass
             await asyncio.sleep(1.0)  # 别刷太快，容易招验证码
         await page.close()
 
     if not collection_name:
-        return len(aweme_ids), 0
+        try:
+            _, left = await fetch_favorites(allow_empty=True)
+        except Exception:
+            # 点击已经执行，但无法二次清点时不能谎称“确认移除”。
+            return [], aweme_ids
+        still = {i["aweme_id"] for i in left}
+        return [a for a in aweme_ids if a not in still], [a for a in aweme_ids if a in still]
     try:
         _, left = await fetch_collection(collection_name)
     except Exception:
-        return len(aweme_ids), 0
+        return [], aweme_ids
     still = {i["aweme_id"] for i in left}
-    removed = sum(1 for a in aweme_ids if a not in still)
-    return removed, len(aweme_ids) - removed
+    return [a for a in aweme_ids if a not in still], [a for a in aweme_ids if a in still]
+
+
+async def uncollect(
+    aweme_ids: list[str], collection_name: str = "", urls: dict[str, str] | None = None,
+) -> tuple[int, int]:
+    """兼容旧调用方：批量取消收藏，返回数量。"""
+    removed, missed = await uncollect_items([
+        {"aweme_id": aid, "url": (urls or {}).get(aid, "")} for aid in aweme_ids
+    ], collection_name)
+    return len(removed), len(missed)

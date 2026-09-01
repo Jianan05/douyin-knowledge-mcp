@@ -2,15 +2,12 @@
 playwright>=1.40
 faster-whisper>=1.0
 yt-dlp>=2026.6.9
+av>=12
+numpy>=1.26
+pillow>=10
+opencv-python-headless>=4.9
+rapidocr-onnxruntime>=1.3
+tomli>=2; python_version < "3.11"
 
 # MCP server (server.py)
 mcp>=1.0,<2
-
-# Web UI (app.py) — optional, only needed if you run the Gradio interface
-gradio>=6.14,<7
-
-# GPU 加速（可选，但有 N 卡就装）：ctranslate2 在 Windows 上找不到系统 CUDA 时，
-# 靠这两个 wheel 提供 cuBLAS/cuDNN；server.py 会自动把它们的 bin 目录加进 DLL 搜索路径。
-# 没有 N 卡时不用装，代码会自动回落到 CPU。
-nvidia-cublas-cu12
-nvidia-cudnn-cu12>=9,<10

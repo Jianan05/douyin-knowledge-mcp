@@ -171,6 +171,29 @@ def _find_desc(value) -> str:
     return ""
 
 
+def _find_aweme_by_id(value, target_id: str) -> dict | None:
+    """只返回目标作品自己的 aweme 字典，拒绝页面预载的推荐作品。"""
+    if isinstance(value, dict):
+        candidate_id = str(value.get("aweme_id") or value.get("group_id") or "")
+        if candidate_id == target_id and isinstance(value.get("video"), dict):
+            return value
+        detail = value.get("aweme_detail")
+        if isinstance(detail, dict):
+            candidate_id = str(detail.get("aweme_id") or detail.get("group_id") or "")
+            if candidate_id == target_id and isinstance(detail.get("video"), dict):
+                return detail
+        for child in value.values():
+            found = _find_aweme_by_id(child, target_id)
+            if found:
+                return found
+    elif isinstance(value, list):
+        for child in value:
+            found = _find_aweme_by_id(child, target_id)
+            if found:
+                return found
+    return None
+
+
 class CaptureResult:
     """一次抓取的产物：候选媒体 + 复用浏览器身份所需的请求头。"""
 
@@ -246,9 +269,9 @@ class DouyinSession:
             await self._shutdown()
             raise DouyinBrowserError(
                 STAGE_LOGIN,
-                f"无法启动专用浏览器（{type(exc).__name__}）",
-                "确认 runtime\\ms-playwright 里的 Chromium 完整，"
-                "或关闭已经打开的同一个 profile 窗口后重试",
+                f"无法启动 Playwright Chromium（{type(exc).__name__}）",
+                "先运行 playwright install chromium；若使用可选 runtime，确认其中的 "
+                "Chromium 完整，或关闭已经打开的同一个 profile 窗口后重试",
             ) from exc
         await self.context.add_init_script(_STEALTH_JS)
         return self
@@ -461,20 +484,33 @@ class DouyinSession:
 
         logged_in = await self.is_logged_in()
 
-        video_dict = None
-        title = ""
+        target_id = _extract_video_id(page_url)
+        target_aweme = None
         for payload in json_payloads:
-            video_dict = video_dict or _find_video_dict(payload)
-            title = title or _find_desc(payload)
-        if not title:
-            try:
-                title = (await page.title() or "").split(" - ")[0].strip()
-            except Exception:
-                title = ""
+            target_aweme = _find_aweme_by_id(payload, target_id)
+            if target_aweme:
+                break
+        if target_id and not target_aweme:
+            raise DouyinBrowserError(
+                STAGE_MEDIA,
+                f"页面没有返回目标作品 {target_id} 的媒体信息，可能已跳到推荐视频",
+                "保留失败记录并稍后重试；不要把当前页面里的其它视频当成目标作品",
+            )
 
-        # 从 JSON 元数据里补充候选（这些 URL 也用同一份 Cookie 下载）。
+        video_dict = (target_aweme or {}).get("video") or None
+        title = str((target_aweme or {}).get("desc") or "").strip()
+
+        # 页面会预载推荐视频。只保留目标作品 JSON 明确给出的媒体 URL；宁可失败，
+        # 也不能把推荐位的音频挂到收藏作品的 ID 下面。
+        candidates.clear()
         for url in _urls_from_video_dict(video_dict):
-            add(url, "", "aweme-json")
+            add(url, "", "aweme-target")
+
+        target_duration = float((video_dict or {}).get("duration") or 0)
+        if target_duration > 1000:
+            target_duration /= 1000
+        if target_duration > 0:
+            page_duration = target_duration
 
         headers_by_url: dict[str, dict[str, str]] = {}
         result = CaptureResult(
@@ -482,7 +518,7 @@ class DouyinSession:
             headers={},
             video_dict=video_dict,
             title=title,
-            video_id=_extract_video_id(final_url) or _extract_video_id(page_url),
+            video_id=target_id,
             logged_in=logged_in,
             page_duration=page_duration,
         )

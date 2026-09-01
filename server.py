@@ -94,10 +94,16 @@ def _extract_url(text: str) -> str:
 
 def _detect_platform(url: str) -> str:
     """Return the supported site name for a URL."""
-    host = urlparse(url).netloc.lower()
-    if "douyin.com" in host or "iesdouyin.com" in host:
+    host = (urlparse(url).hostname or "").lower()
+    if any(
+        host == root or host.endswith("." + root)
+        for root in ("douyin.com", "iesdouyin.com")
+    ):
         return "douyin"
-    if "bilibili.com" in host or host.endswith("b23.tv"):
+    if any(
+        host == root or host.endswith("." + root)
+        for root in ("bilibili.com", "b23.tv")
+    ):
         return "bilibili"
     raise ValueError(f"暂不支持这个网站: {host or url}")
 
@@ -114,6 +120,8 @@ async def _get_video_object(page_url: str) -> dict:
     返回 aweme_detail.video 字典（包含 bit_rate 数组和 play_addr）。
     """
     last_error: Exception | None = None
+    target_match = re.search(r"/(?:share/)?video/(\d+)", page_url)
+    target_id = target_match.group(1) if target_match else ""
 
     for attempt in range(_DETAIL_RESPONSE_RETRIES):
         async with async_playwright() as p:
@@ -139,7 +147,13 @@ async def _get_video_object(page_url: str) -> dict:
                     except Exception as e:
                         last_error = e
                         return
-                    if payload.get("aweme_detail") and not detail_future.done():
+                    detail = payload.get("aweme_detail") or {}
+                    detail_id = str(detail.get("aweme_id") or detail.get("group_id") or "")
+                    if (
+                        detail
+                        and (not target_id or detail_id == target_id)
+                        and not detail_future.done()
+                    ):
                         detail_future.set_result(payload)
 
                 def on_response(resp):
@@ -1306,6 +1320,42 @@ def strip_prompt_echo(text: str, prompt: str) -> str:
     return "\n".join(kept).strip()
 
 
+class TimestampedTranscript(str):
+    """向后兼容的转写字符串，同时携带来源侧可追溯数据。"""
+
+    def __new__(cls, text: str, *, segments: list[dict], asr: dict):
+        value = super().__new__(cls, text)
+        value.segments = segments
+        value.asr = asr
+        return value
+
+
+def _optional_float(value) -> float | None:
+    """把 faster-whisper 的可选数值变成严格 JSON 可写的有限浮点数。"""
+    import math
+
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return round(number, 6) if math.isfinite(number) else None
+
+
+def _clean_timestamped_segment(raw_text: str, prompt: str, use_prompt: bool) -> tuple[str, list[str]]:
+    """在原生 segment 内清洗，避免拼平全文后丢失时间映射。"""
+    cleaned = raw_text.strip()
+    applied: list[str] = []
+    if use_prompt:
+        without_echo = strip_prompt_echo(cleaned, prompt)
+        if without_echo != cleaned:
+            applied.append("prompt_echo")
+        cleaned = without_echo
+    without_boilerplate = strip_hallucinated_boilerplate(cleaned)
+    if without_boilerplate != cleaned:
+        applied.append("hallucinated_boilerplate")
+    return without_boilerplate, applied
+
+
 def _transcribe_segments_sync(
     file_path: str,
     model_size: str = WHISPER_MODEL,
@@ -1355,23 +1405,56 @@ def _transcribe_segments_sync(
             **extra,
         )
 
-    def collect(segments, info) -> str:
+    def collect(segments, info, *, use_vad: bool, use_prompt: bool) -> TimestampedTranscript:
         total = float(getattr(info, "duration", 0.0) or 0.0)
-        parts: list[str] = []
-        for seg in segments:
-            text = seg.text.strip()
-            if text:
-                parts.append(text)
+        raw_parts: list[str] = []
+        cleaned_parts: list[str] = []
+        records: list[dict] = []
+        for index, seg in enumerate(segments):
+            raw_text = str(getattr(seg, "text", "") or "").strip()
+            cleaned_text, cleaning = _clean_timestamped_segment(
+                raw_text, prompt, use_prompt
+            )
+            if raw_text:
+                raw_parts.append(raw_text)
+            if cleaned_text:
+                cleaned_parts.append(cleaned_text)
+            records.append({
+                "segment_id": index,
+                "start": _optional_float(getattr(seg, "start", None)),
+                "end": _optional_float(getattr(seg, "end", None)),
+                "raw_text": raw_text,
+                "cleaned_text": cleaned_text,
+                "cleaning": cleaning,
+                "avg_logprob": _optional_float(getattr(seg, "avg_logprob", None)),
+                "no_speech_prob": _optional_float(getattr(seg, "no_speech_prob", None)),
+                "compression_ratio": _optional_float(getattr(seg, "compression_ratio", None)),
+                "temperature": _optional_float(getattr(seg, "temperature", None)),
+            })
             if on_segment is not None:
-                on_segment(float(seg.end or 0.0), total, "\n".join(parts))
-        return "\n".join(parts)
+                on_segment(float(getattr(seg, "end", 0.0) or 0.0), total, "\n".join(raw_parts))
+        return TimestampedTranscript(
+            "\n".join(cleaned_parts),
+            segments=records,
+            asr={
+                "model": model_size,
+                "language": str(getattr(info, "language", "") or ""),
+                "language_probability": _optional_float(
+                    getattr(info, "language_probability", None)
+                ),
+                "duration": _optional_float(getattr(info, "duration", None)),
+                "vad_filter": use_vad,
+                "initial_prompt": use_prompt,
+                "condition_on_previous_text": False,
+                "beam_size": 5,
+            },
+        )
 
     prompt = build_initial_prompt(terms)
 
-    def attempt(active_model, use_vad: bool, use_prompt: bool) -> str:
-        text = collect(*decode(active_model, use_vad=use_vad, use_prompt=use_prompt))
-        cleaned = strip_prompt_echo(text, prompt) if use_prompt else text.strip()
-        return strip_hallucinated_boilerplate(cleaned)
+    def attempt(active_model, use_vad: bool, use_prompt: bool) -> TimestampedTranscript:
+        segments, info = decode(active_model, use_vad=use_vad, use_prompt=use_prompt)
+        return collect(segments, info, use_vad=use_vad, use_prompt=use_prompt)
 
     def run(active_model) -> str:
         """
@@ -1448,6 +1531,34 @@ async def _download_douyin_media(
         raise RuntimeError(
             f"{primary}\n（旧方案兜底也失败：{legacy_error}）"
         ) from primary
+
+
+async def _download_douyin_video_object(
+    video: dict, out_dir: str, need: str = "audio", on_progress=None
+) -> str:
+    """直接下载收藏接口中与目标 aweme 绑定的媒体，避免作品页推荐流串稿。"""
+    dl_url = (
+        _pick_url_for_transcription(video) if need == "audio" else _pick_url_for_download(video)
+    )
+    suffix = ".m4a" if need == "audio" else ".mp4"
+    out_path = os.path.join(out_dir, f"douyin_collected_{need}{suffix}")
+    headers = {
+        "User-Agent": _UA,
+        "Referer": "https://www.douyin.com/",
+        "Accept": "*/*",
+    }
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(
+        _DOWNLOAD_EXECUTOR,
+        functools.partial(
+            _download_sync, dl_url, out_path, headers=headers, progress_cb=on_progress
+        ),
+    )
+    if need == "audio" and not _file_has_audio(out_path):
+        raise RuntimeError("收藏接口媒体没有音频流")
+    if need == "video" and not _file_has_video(out_path):
+        raise RuntimeError("收藏接口媒体没有画面")
+    return out_path
 
 
 async def _download_transcription_media(
@@ -1533,8 +1644,8 @@ async def analyze_douyin(url: str, model_size: str = WHISPER_MODEL) -> str:
 
     url: 抖音或 Bilibili 分享链接/分享文本（自动提取URL）。
          支持格式：
-           - 纯URL:  https://v.douyin.com/43Hxli09K70/
-           - 长URL:  https://www.douyin.com/video/7628423061288682112
+           - 纯URL:  https://v.douyin.com/xxxxxx/
+           - 长URL:  https://www.douyin.com/video/1234567890123456789
            - Bilibili: https://www.bilibili.com/video/BV...
            - 分享文本: "5.33 复制打开抖音... https://v.douyin.com/xxx/"，自动提取URL
     model_size: Whisper 模型大小，默认 "tiny"（快）。
@@ -1658,7 +1769,8 @@ async def douyin_to_text(url: str, model_size: str = WHISPER_MODEL) -> str:
     无法承受完整流程（25-90 秒）的同步调用。
 
     url: 抖音或 Bilibili 分享链接/分享文本（自动提取URL）。
-         支持: https://v.douyin.com/xxx/、https://www.douyin.com/video/xxx、
+         支持: https://v.douyin.com/xxxxxx/、
+               https://www.douyin.com/video/1234567890123456789、
                https://www.bilibili.com/video/BV... 或整段分享文本
     model_size: Whisper 模型，默认 "tiny"（快）。准度不够时改 "small"。
     """
