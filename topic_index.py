@@ -154,4 +154,9 @@ def build(threshold: float = 0.35, rebuild: bool = False):
 
 
 if __name__ == "__main__":
+    if "--legacy-run" not in sys.argv:
+        raise SystemExit(
+            "抖音侧 BGE-M3 话题目录已冻结；语义笔记与检索改由下游 RAG 项目负责。"
+            "如需恢复旧结果，显式加 --legacy-run。"
+        )
     build(rebuild="--rebuild" in sys.argv)

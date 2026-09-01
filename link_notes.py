@@ -98,4 +98,9 @@ def apply(dry_run: bool = True) -> None:
 
 
 if __name__ == "__main__":
+    if "--legacy-run" not in sys.argv:
+        raise SystemExit(
+            "抖音侧 BGE-M3 相关笔记互链已冻结；语义笔记与检索改由下游 RAG 项目负责。"
+            "如需恢复旧结果，显式加 --legacy-run。"
+        )
     apply(dry_run="--apply" not in sys.argv)
