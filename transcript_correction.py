@@ -6,8 +6,21 @@ import argparse
 import hashlib
 import json
 import os
+import sys
 from datetime import datetime
 from pathlib import Path
+
+
+PROJECT_DIR = Path(__file__).resolve().parent
+if str(PROJECT_DIR) not in sys.path:
+    sys.path.insert(0, str(PROJECT_DIR))
+
+if os.name == "nt":
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, OSError):
+            pass
 
 
 DEFAULT_LIBRARY = Path.home() / "Desktop" / "DouyinNotes"
