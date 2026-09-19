@@ -17,8 +17,10 @@ Architecture:
   - faster-whisper transcribes (it internally uses ffmpeg on local files, which is fine)
 """
 
+import argparse
 import asyncio
 import functools
+import hashlib
 import json
 import os
 import re
@@ -29,14 +31,39 @@ import tempfile
 import time
 import urllib.request
 import uuid
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import urlparse
 
-from playwright.async_api import async_playwright
-from mcp.server.fastmcp import FastMCP
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-mcp = FastMCP("Video Analysis", log_level="ERROR")
+from playwright.async_api import async_playwright
+from mcp.types import ToolAnnotations
+
+from mcp_handoff import (
+    CreateData,
+    CreateEnvelope,
+    CreateResult,
+    FailedJobData,
+    PackageData,
+    RunningData,
+    StatusEnvelope,
+    StatusResult,
+    StrictFastMCP,
+    failure_result,
+    load_fixture,
+    safe_error,
+    success_result,
+)
+from source_package import (
+    SourcePackageError,
+    build_protected_fields,
+    write_source_package_v2,
+)
+
+mcp = StrictFastMCP("Video Analysis", log_level="ERROR")
+_TEST_FIXTURE_ROOT: Path | None = None
 
 _URL_RE = re.compile(
     r'https?://\S+|(?:www\.)?(?:v\.douyin\.com|douyin\.com|iesdouyin\.com|bilibili\.com|b23\.tv)/\S+',
@@ -783,7 +810,7 @@ def _download_first_available(
 def _download_bilibili_transcription_media_via_api_sync(
     url: str, out_dir: str, progress_cb=None
 ) -> str:
-    _, playurl, bvid = _bilibili_view_and_playurl_sync(url, qn=16)
+    view, playurl, bvid = _bilibili_view_and_playurl_sync(url, qn=16)
     audio = (playurl.get("dash") or {}).get("audio") or []
     audio = [item for item in audio if _bilibili_media_urls(item)]
     if not audio:
@@ -792,6 +819,11 @@ def _download_bilibili_transcription_media_via_api_sync(
     headers = _bilibili_headers({"http_headers": {"Referer": f"https://www.bilibili.com/video/{bvid}/"}})
     out_path = os.path.join(out_dir, "bilibili_media.m4a")
     _download_first_available(_bilibili_media_urls(best_audio), out_path, headers, progress_cb)
+    _LAST_CAPTURE_META[out_path] = {
+        "title": str(view.get("title") or bvid),
+        "video_id": bvid,
+        "logged_in": False,
+    }
     return out_path
 
 
@@ -846,6 +878,11 @@ def _download_bilibili_transcription_media_sync(url: str, out_dir: str, progress
         ext = _safe_extension(fmt.get("ext"), "m4a")
         out_path = os.path.join(out_dir, f"bilibili_media.{ext}")
         _download_sync(fmt["url"], out_path, headers=_bilibili_headers(info, fmt), progress_cb=progress_cb)
+        _LAST_CAPTURE_META[out_path] = {
+            "title": str(info.get("title") or info.get("id") or "Bilibili 视频"),
+            "video_id": str(info.get("id") or _bilibili_bvid_from_url(url)),
+            "logged_in": False,
+        }
         return out_path
     except Exception:
         return _download_bilibili_transcription_media_via_api_sync(url, out_dir, progress_cb)
@@ -1401,6 +1438,10 @@ def _transcribe_segments_sync(
 
     def collect(segments, info, *, use_vad: bool, use_prompt: bool) -> TimestampedTranscript:
         total = float(getattr(info, "duration", 0.0) or 0.0)
+        device, compute_type = _pick_device()
+        prompt_hash = (
+            hashlib.sha256(prompt.encode("utf-8")).hexdigest() if use_prompt else None
+        )
         raw_parts: list[str] = []
         cleaned_parts: list[str] = []
         records: list[dict] = []
@@ -1432,15 +1473,21 @@ def _transcribe_segments_sync(
             segments=records,
             asr={
                 "model": model_size,
-                "language": str(getattr(info, "language", "") or ""),
+                "language": str(getattr(info, "language", "") or "und"),
                 "language_probability": _optional_float(
                     getattr(info, "language_probability", None)
                 ),
                 "duration": _optional_float(getattr(info, "duration", None)),
                 "vad_filter": use_vad,
                 "initial_prompt": use_prompt,
+                "initial_prompt_enabled": use_prompt,
+                "initial_prompt_sha256": prompt_hash,
                 "condition_on_previous_text": False,
                 "beam_size": 5,
+                "vad_threshold": 0.3 if use_vad else None,
+                "min_silence_duration_ms": 800 if use_vad else None,
+                "device": device,
+                "compute_type": compute_type,
             },
         )
 
@@ -1712,44 +1759,320 @@ def _gc_jobs():
         _JOBS.pop(jid, None)
 
 
-async def _full_pipeline_bg(job_id: str, url: str, model_size: str) -> None:
-    """后台跑完整流程：URL 提取 → 下载 → 转录。"""
-    job = _JOBS[job_id]
-    loop = asyncio.get_event_loop()
-    tmp_dir = None
-    try:
-        job["stage"] = "extracting_url"
-        real_url = _extract_url(url)
+def _looks_empty(transcript: str, duration: float) -> bool:
+    """沿用 CLI 的稀疏语音判据，决定是否需要画面 OCR。"""
 
-        tmp_dir = tempfile.mkdtemp(prefix="douyin_job_")
+    chars = len(transcript.replace("\n", "").replace(" ", ""))
+    return chars < 20 or (duration > 20 and chars < duration * 1.5)
 
-        job["stage"] = "downloading"
-        media_path, platform = await _download_transcription_media(real_url, tmp_dir)
 
-        job["stage"] = "transcribing"
-        text = await loop.run_in_executor(
-            _TRANSCRIBE_EXECUTOR, _transcribe_sync, media_path, model_size
+async def _read_screen_text(
+    url: str,
+    transcript: str,
+    download_lock: asyncio.Lock | None = None,
+) -> tuple[str, list]:
+    """复用现有下载器抽帧 OCR，不改变 OCR 算法。"""
+
+    import frames
+
+    with tempfile.TemporaryDirectory(prefix="frames_") as tmp:
+        if download_lock is None:
+            path = await _download_douyin_media(url, tmp, need="video")
+        else:
+            async with download_lock:
+                path = await _download_douyin_media(url, tmp, need="video")
+        screen, words = await asyncio.to_thread(frames.read_screen, path)
+        return screen, frames.candidates(words, transcript)
+
+
+def _source_id_from_url(url: str, platform: str) -> str:
+    """从稳定长链提取可核对的来源身份；短链依赖捕获元数据。"""
+
+    if platform == "douyin":
+        match = re.search(r"/(?:share/)?video/(\d+)", url)
+        return match.group(1) if match else ""
+    if platform == "bilibili":
+        match = re.search(r"(BV[0-9A-Za-z]+)", url)
+        return match.group(1) if match else ""
+    return ""
+
+
+def _title_and_tags(value: str, source_id: str) -> tuple[str, list[str]]:
+    """从捕获标题提取标签，并保证来源标题非空。"""
+
+    raw = str(value or "").strip()
+    tags = sorted(set(re.findall(r"#([^#\s]+)", raw)))
+    title = re.sub(r"#[^#\s]+", " ", raw)
+    title = re.sub(r"\s+", " ", title).strip()
+    return title or raw or source_id, tags
+
+
+async def _process_source(
+    job: dict,
+    url: str,
+    model_size: str,
+    include_ocr: bool,
+    *,
+    require_package_metadata: bool = True,
+) -> dict:
+    """旧转录工具和新打包工具共用的唯一处理后端。"""
+
+    job["stage"] = "extracting_url"
+    real_url = _extract_url(url)
+    if _TEST_FIXTURE_ROOT is not None:
+        fixture = load_fixture(_TEST_FIXTURE_ROOT, real_url, model_size)
+        transcript_data = fixture.transcript
+        transcript = TimestampedTranscript(
+            transcript_data.text,
+            segments=[row.model_dump(mode="json") for row in transcript_data.segments],
+            asr=transcript_data.asr.model_dump(mode="json"),
         )
+        duration = float(fixture.source.duration_seconds)
+        screen = ""
+        candidates: list = []
+        policy = "disabled"
+        if include_ocr:
+            policy = "sparse-audio-douyin-v1"
+            if fixture.source.platform == "douyin" and _looks_empty(str(transcript), duration):
+                job["stage"] = "ocr"
+                screen = fixture.ocr.screen_ocr
+                candidates = [
+                    row.model_dump(mode="json") for row in fixture.ocr.screen_candidates
+                ]
+        return {
+            "source": fixture.source.model_dump(mode="json"),
+            "transcript": transcript,
+            "screen_ocr": screen,
+            "screen_candidates": candidates,
+            "ocr_policy": policy,
+        }
 
+    tmp_dir = tempfile.mkdtemp(prefix="douyin_job_")
+    try:
+        job["stage"] = "downloading"
+        try:
+            media_path, platform = await _download_transcription_media(real_url, tmp_dir)
+        except Exception:
+            if require_package_metadata:
+                raise SourcePackageError("DOWNLOAD_FAILED", retryable=True) from None
+            raise
+        metadata = capture_meta(media_path)
+        captured_id = str(metadata.get("video_id") or "").strip()
+        expected_id = _source_id_from_url(real_url, platform)
+        if require_package_metadata and captured_id and expected_id and captured_id != expected_id:
+            raise SourcePackageError("SOURCE_ID_MISMATCH")
+        source_id = captured_id or expected_id
+        if require_package_metadata and not source_id:
+            raise SourcePackageError("SOURCE_ID_MISMATCH")
+        source_id = source_id or "legacy-transcript"
+        title, tags = _title_and_tags(str(metadata.get("title") or ""), source_id)
+        duration = media_duration(media_path)
+        job["stage"] = "transcribing"
+        loop = asyncio.get_running_loop()
+        try:
+            transcript = await loop.run_in_executor(
+                _TRANSCRIBE_EXECUTOR,
+                _transcribe_segments_sync,
+                media_path,
+                model_size,
+            )
+        except Exception:
+            if require_package_metadata:
+                raise SourcePackageError("TRANSCRIPTION_FAILED", retryable=True) from None
+            raise
+        if transcript.asr.get("duration") is None:
+            transcript.asr["duration"] = duration
+        screen = ""
+        candidates: list = []
+        policy = "disabled"
+        if include_ocr:
+            policy = "sparse-audio-douyin-v1"
+            if platform == "douyin" and _looks_empty(str(transcript), duration):
+                job["stage"] = "ocr"
+                try:
+                    screen, candidates = await _read_screen_text(real_url, str(transcript))
+                except Exception:
+                    if not str(transcript).strip():
+                        raise SourcePackageError("EMPTY_PROJECTED_TEXT") from None
+                    screen, candidates = "", []
+        return {
+            "source": {
+                "platform": platform,
+                "source_id": source_id,
+                "url": real_url,
+                "title": title,
+                "tags": tags,
+                "duration_seconds": duration,
+            },
+            "transcript": transcript,
+            "screen_ocr": screen,
+            "screen_candidates": candidates,
+            "ocr_policy": policy,
+        }
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+async def _full_pipeline_bg(job_id: str, url: str, model_size: str) -> None:
+    """旧异步工具适配层；正文返回行为保持不变。"""
+
+    job = _JOBS[job_id]
+    try:
+        processed = await _process_source(
+            job,
+            url,
+            model_size,
+            False,
+            require_package_metadata=False,
+        )
+        text = str(processed["transcript"])
+        platform = processed["source"]["platform"]
         job["status"] = "done"
         job["stage"] = "done"
         job["result"] = text or f"（{_platform_label(platform)} 未检测到语音内容）"
-    except Exception as e:
+    except Exception as exc:
         job["status"] = "error"
-        job["result"] = f"{type(e).__name__}: {e}"
+        job["result"] = f"{type(exc).__name__}: {exc}"
     finally:
         job["done_at"] = time.time()
-        # 清理临时文件
-        if tmp_dir:
-            try:
-                for f in os.listdir(tmp_dir):
-                    try:
-                        os.remove(os.path.join(tmp_dir, f))
-                    except OSError:
-                        pass
-                os.rmdir(tmp_dir)
-            except OSError:
-                pass
+
+
+async def _source_package_bg(
+    job_id: str,
+    url: str,
+    model_size: str,
+    include_ocr: bool,
+    root: Path,
+) -> None:
+    """在共享处理结果上构造并发布 v2 来源包。"""
+
+    job = _JOBS[job_id]
+    try:
+        processed = await _process_source(job, url, model_size, include_ocr)
+        job["stage"] = "packaging"
+        transcript = processed["transcript"]
+        protected, projection_sha256 = build_protected_fields(
+            source=processed["source"],
+            segments=list(transcript.segments),
+            asr=dict(transcript.asr),
+            screen_ocr=processed["screen_ocr"],
+            screen_candidates=processed["screen_candidates"],
+            ocr_policy=processed["ocr_policy"],
+        )
+        receipt = write_source_package_v2(root, protected, projection_sha256)
+        job["status"] = "succeeded"
+        job["result"] = receipt
+    except SourcePackageError as exc:
+        job["status"] = "failed"
+        job["result"] = safe_error(exc.code, retryable=exc.retryable).model_dump(mode="json")
+    except (OSError, ValueError):
+        code = "INVALID_FIXTURE" if _TEST_FIXTURE_ROOT is not None else "INTERNAL_ERROR"
+        job["status"] = "failed"
+        job["result"] = safe_error(code).model_dump(mode="json")
+    except Exception:
+        job["status"] = "failed"
+        job["result"] = safe_error("INTERNAL_ERROR").model_dump(mode="json")
+    finally:
+        job["done_at"] = time.time()
+
+
+@mcp.tool(
+    description="异步生成严格 v2 来源包；只返回任务编号，不返回转写正文。",
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=True,
+    ),
+    structured_output=True,
+)
+async def create_source_package(
+    protocol_version: str,
+    url: str,
+    model_size: str = WHISPER_MODEL,
+    include_ocr: bool = True,
+) -> CreateResult:
+    """提交来源包任务，并复用现有内存任务表。"""
+
+    if protocol_version != "1.0.0":
+        return failure_result("UNSUPPORTED_PROTOCOL_VERSION")
+    if not isinstance(url, str) or not url.strip() or model_size not in _ALLOWED_MODELS:
+        return failure_result("INVALID_ARGUMENT")
+    configured_root = os.environ.get("DOUYIN_SOURCE_PACKAGE_ROOT", "").strip()
+    if not configured_root:
+        return failure_result("SOURCE_PACKAGE_ROOT_NOT_CONFIGURED")
+    root = Path(configured_root)
+    if not root.is_absolute():
+        return failure_result("INVALID_ARGUMENT")
+    if root.resolve(strict=False).name.casefold() == "_source_packages":
+        return failure_result("INVALID_ARGUMENT")
+    _gc_jobs()
+    job_id = uuid.uuid4().hex[:8]
+    _JOBS[job_id] = {
+        "kind": "source_package",
+        "status": "running",
+        "stage": "queued",
+        "result": None,
+        "started": time.time(),
+    }
+    asyncio.create_task(
+        _source_package_bg(job_id, url, model_size, include_ocr, root)
+    )
+    return success_result(CreateEnvelope(data=CreateData(job_id=job_id)))
+
+
+@mcp.tool(
+    description="查询来源包任务状态；成功时返回摘要和本地路径，不返回正文。",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=False,
+    ),
+    structured_output=True,
+)
+async def get_source_package_status(
+    protocol_version: str,
+    job_id: str,
+) -> StatusResult:
+    """读取来源包任务状态；成功结果在 TTL 内不弹出。"""
+
+    if protocol_version != "1.0.0":
+        return failure_result("UNSUPPORTED_PROTOCOL_VERSION")
+    if not isinstance(job_id, str) or not job_id.strip():
+        return failure_result("INVALID_ARGUMENT")
+    _gc_jobs()
+    job = _JOBS.get(job_id)
+    if job is None or job.get("kind") != "source_package":
+        return failure_result("JOB_NOT_FOUND")
+    if job["status"] == "running":
+        stage = job["stage"]
+        status = "queued" if stage == "queued" else "running"
+        return success_result(
+            StatusEnvelope(
+                data=RunningData(job_id=job_id, status=status, stage=stage)
+            )
+        )
+    if job["status"] == "failed":
+        return success_result(
+            StatusEnvelope(
+                data=FailedJobData(
+                    job_id=job_id,
+                    error=job["result"],
+                )
+            )
+        )
+    receipt = job["result"]
+    return success_result(
+        StatusEnvelope(
+            data=PackageData(
+                job_id=job_id,
+                package_id=receipt["package_id"],
+                package_sha256=receipt["package_sha256"],
+                source_package_path=receipt["source_package_path"],
+            )
+        )
+    )
 
 
 @mcp.tool()
@@ -1802,20 +2125,21 @@ async def get_transcript_result(job_id: str, wait_seconds: float = 25.0) -> str:
     job_id: douyin_to_text 返回的任务ID。
     wait_seconds: 最长等待秒数（默认 25，必须小于客户端超时）。
     """
-    if job_id not in _JOBS:
+    initial_job = _JOBS.get(job_id)
+    if initial_job is None or initial_job.get("kind", "transcript") != "transcript":
         return f"未知或已过期的 job_id: {job_id}"
 
     deadline = time.time() + max(0.5, min(wait_seconds, 28.0))
     while time.time() < deadline:
         job = _JOBS.get(job_id)
-        if not job:
+        if not job or job.get("kind", "transcript") != "transcript":
             return f"未知或已过期的 job_id: {job_id}"
         if job["status"] != "running":
             break
         await asyncio.sleep(0.5)
 
     job = _JOBS.get(job_id)
-    if not job:
+    if not job or job.get("kind", "transcript") != "transcript":
         return f"任务结果已过期: {job_id}"
 
     elapsed = time.time() - job["started"]
@@ -1864,5 +2188,21 @@ async def transcribe_video(file_path: str, model_size: str = WHISPER_MODEL) -> s
     return transcript
 
 
-if __name__ == "__main__":
+def main(argv: list[str] | None = None) -> None:
+    """启动 STDIO MCP；fixture 模式只能由显式命令行参数开启。"""
+
+    parser = argparse.ArgumentParser(add_help=True)
+    parser.add_argument("--test-fixture-root", type=Path)
+    args = parser.parse_args(argv)
+    global _TEST_FIXTURE_ROOT
+    if args.test_fixture_root is not None:
+        root = args.test_fixture_root
+        if not root.is_absolute() or not root.is_dir():
+            parser.error("--test-fixture-root 必须是已存在的绝对目录")
+        _TEST_FIXTURE_ROOT = root.resolve(strict=True)
+        print("[test mode] fixture backend enabled", file=sys.stderr)
     mcp.run(transport="stdio")
+
+
+if __name__ == "__main__":
+    main()
