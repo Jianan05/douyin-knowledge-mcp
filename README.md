@@ -215,6 +215,14 @@ python continuous_favorites.py --target-min 100
 
 人工审阅首次进入“可参考/重点深挖”时会追加到 `_待影响扫描.jsonl`。`--pending-reviewed` 会按需增量更新过期的语义索引，成功生成报告后再在同一追加式队列中记录完成事件；中途失败不会吞掉队列。命令会同时写 Markdown 讨论包和 JSON 机器报告。正式笔记 `source_ids` 中已有的来源会直接标为 `already_incorporated`；其余来源的相似度只用于候选路由，`duplicate / supports / refines / contradicts / unrelated` 必须人工核对后填写。报告不会直接修改正式知识。
 
+需要审核影响候选时，启动本地页面：
+
+```powershell
+.\runtime\python\python.exe impact_review.py
+```
+
+页面会读取最新的非作废影响报告，把关系判断追加到 `_impact_review_events.jsonl`，并可生成 `_讨论工作区/知识修改草案/` 下的讨论稿。讨论稿带机器路由与人工判断来源标记，但不会改写 `notes/`；正式知识仍须通过显式用户确认门。
+
 ### 7. 视觉校准与审计
 
 ```powershell
