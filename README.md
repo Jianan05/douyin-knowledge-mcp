@@ -75,6 +75,14 @@ python ingest.py --login
 
 程序不读取日常 Chrome/Edge 的 Cookie，也不接触密码。登录状态保存在已忽略的 `data/` 目录。
 
+随时可以只读查看库规模、审阅覆盖率、当前失败项、精选知识数量和索引状态：
+
+```powershell
+.\runtime\python\python.exe library_status.py --check-semantic
+```
+
+该命令不会输出转录正文；不加 `--check-semantic` 时连正文哈希扫描也会跳过。
+
 ### 2. 链接入库
 
 ```powershell
