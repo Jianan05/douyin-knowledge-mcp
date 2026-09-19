@@ -114,6 +114,7 @@ class ImpactScanTests(unittest.TestCase):
         result = impact_scan.score_impacts(rows, vectors, ["s"], threshold=0.5)[0]
         self.assertEqual(result["routing_status"], "new_topic_candidate")
         self.assertEqual(result["candidates"], [])
+        self.assertEqual(result["source_preview"], "source")
 
     def test_markdown_keeps_relation_as_manual_field(self):
         report = {

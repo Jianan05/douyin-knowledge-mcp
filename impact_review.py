@@ -98,7 +98,20 @@ def review_items(root: Path, report_path: Path | None = None) -> tuple[Path, dic
     decisions = load_decisions(root / EVENTS_NAME)
     items: list[dict] = []
     for result in report.get("results") or []:
-        for candidate in result.get("candidates") or []:
+        candidates = list(result.get("candidates") or [])
+        if not candidates and result.get("routing_status") == "new_topic_candidate":
+            candidates = [{
+                "score": 0.0,
+                "note_title": "（新专题候选）",
+                "note_path": "",
+                "material_chunk_id": "",
+                "curated_chunk_id": "",
+                "material_preview": str(result.get("source_preview") or ""),
+                "curated_preview": "当前精选知识中没有达到阈值的相关主题。",
+                "already_cited": False,
+                "new_topic_candidate": True,
+            }]
+        for candidate in candidates:
             key = candidate_id(path, str(result.get("source_id") or ""), str(candidate.get("note_path") or ""))
             item = {
                 "candidate_id": key,
@@ -179,8 +192,12 @@ def render_draft(root: Path, report_path: Path | None = None) -> tuple[Path, str
             f"## {number}. {item['note_title']}",
             "",
             f"- 来源：{item['source_title']}（`{item['source_id']}`）",
-            f"- 正式笔记：`{item['note_path']}`",
-            f"- 机器相似度：`{float(item['score']):.4f}`（语义相似度路由，弱）",
+            f"- 正式笔记：`{item['note_path'] or '（当前无匹配正式知识）'}`",
+            (
+                "- 机器路由：`new_topic_candidate`（未命中现有正式知识，弱）"
+                if item.get("new_topic_candidate")
+                else f"- 机器相似度：`{float(item['score']):.4f}`（语义相似度路由，弱）"
+            ),
             f"- 人工关系：`{decision['relation']}`（人工关系判断）",
             f"- 建议动作：`{decision['action']}`（人工关系判断）",
             f"- 人工备注：{decision.get('note') or '（未填写）'}（人工填写）",

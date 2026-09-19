@@ -200,6 +200,7 @@ def score_impacts(
             "source_id": source_id,
             "source_title": source_row.get("title") or source_id,
             "source_path": source_row.get("path") or "",
+            "source_preview": str(source_row.get("text") or "")[:300],
             "review_status": source_row.get("review_status") or "pending",
             "routing_status": routing_status,
             "candidates": kept,

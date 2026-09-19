@@ -98,6 +98,33 @@ class ImpactReviewTests(unittest.TestCase):
         self.assertIn("/api/draft", impact_review.PAGE)
         self.assertIn("不会直接修改正式知识", impact_review.PAGE)
 
+    def test_new_topic_without_matches_is_still_reviewable(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            report = root / impact_review.REPORT_DIR / "new-topic.json"
+            report.parent.mkdir(parents=True)
+            report.write_text(json.dumps({
+                "title": "新专题扫描",
+                "results": [{
+                    "source_id": "new-topic", "source_title": "趋势假设",
+                    "source_path": "source.md", "source_preview": "假设正文",
+                    "routing_status": "new_topic_candidate", "candidates": [],
+                }],
+            }, ensure_ascii=False), encoding="utf-8")
+
+            item = impact_review.review_items(root, report)[2][0]
+            self.assertTrue(item["new_topic_candidate"])
+            self.assertEqual(item["note_path"], "")
+            saved = impact_review.save_decision(root, {
+                "candidate_id": item["candidate_id"],
+                "relation": "unrelated", "action": "source_only",
+                "note": "证据不足，暂不建专题",
+            }, report)
+            self.assertEqual(saved["action"], "source_only")
+            _, draft = impact_review.render_draft(root, report)
+            self.assertIn("当前无匹配正式知识", draft)
+            self.assertIn("new_topic_candidate", draft)
+
     def test_http_api_lists_and_appends_decision(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
