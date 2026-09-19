@@ -95,6 +95,23 @@ class ReviewBookTests(unittest.TestCase):
             self.assertEqual({row["video_id"] for row in rows}, {"10000000002"})
             self.assertTrue(all(row["review_status"] == "pending" for row in rows))
 
+    def test_entering_reference_state_queues_one_impact_scan(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._library(root)
+            rb.prepare_batch(root, limit=1)
+
+            rb.set_status(root, "10000000001", "可参考", "值得保留")
+            rb.set_status(root, "10000000001", "重点深挖", "进一步查看")
+
+            events = [
+                json.loads(line)
+                for line in (root / rb.IMPACT_QUEUE_NAME).read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0]["event"], "queued")
+            self.assertEqual(events[0]["video_id"], "10000000001")
+
     def test_delete_requires_request_and_exact_second_confirmation(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

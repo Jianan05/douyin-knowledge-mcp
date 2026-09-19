@@ -208,9 +208,12 @@ python continuous_favorites.py --target-min 100
   --source-id <video_id1> --source-id <video_id2>
 
 .\runtime\python\python.exe impact_scan.py --since 2026-09-01
+
+# 日常推荐：处理刚被人工标成“可参考/重点深挖”的来源
+.\runtime\python\python.exe impact_scan.py --pending-reviewed
 ```
 
-命令会同时写 Markdown 讨论包和 JSON 机器报告。正式笔记 `source_ids` 中已有的来源会直接标为 `already_incorporated`；其余来源的相似度只用于候选路由，`duplicate / supports / refines / contradicts / unrelated` 必须人工核对后填写。报告不会直接修改正式知识。
+人工审阅首次进入“可参考/重点深挖”时会追加到 `_待影响扫描.jsonl`。`--pending-reviewed` 会按需增量更新过期的语义索引，成功生成报告后再在同一追加式队列中记录完成事件；中途失败不会吞掉队列。命令会同时写 Markdown 讨论包和 JSON 机器报告。正式笔记 `source_ids` 中已有的来源会直接标为 `already_incorporated`；其余来源的相似度只用于候选路由，`duplicate / supports / refines / contradicts / unrelated` 必须人工核对后填写。报告不会直接修改正式知识。
 
 ### 7. 视觉校准与审计
 

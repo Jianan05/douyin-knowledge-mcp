@@ -14,6 +14,7 @@ if str(PROJECT_DIR) not in sys.path:
 
 import review_book
 import semantic_index
+import impact_scan
 
 
 DEFAULT_LIBRARY = Path.home() / "Desktop" / "DouyinNotes"
@@ -89,6 +90,7 @@ def library_status(root: Path, check_semantic: bool = False) -> dict:
             1 for line in (root / "_knowledge_events.jsonl").read_text(encoding="utf-8").splitlines()
             if line.strip()
         ) if (root / "_knowledge_events.jsonl").is_file() else 0,
+        "pending_impact_scans": len(impact_scan.pending_reviewed_source_ids(root)),
         "active_failures": active_failures,
         "failure_items_seen": len(failures),
         "semantic_index": semantic,
@@ -109,7 +111,8 @@ def render_status(status: dict) -> str:
         f"知识库：{status['root']}",
         f"入库作品：{status['indexed_items']}；来源包：{status['source_packages']}；视觉资产文件：{status['asset_files']}",
         f"人工审阅：{status['reviewed_items']}（{status['review_coverage_percent']}%）；{review_text}",
-        f"精选知识：{status['curated_notes']} 条；确认事件：{status['knowledge_events']}",
+        f"精选知识：{status['curated_notes']} 条；确认事件：{status['knowledge_events']}；"
+        f"待影响扫描：{status['pending_impact_scans']} 条",
         f"当前失败项：{status['active_failures']}（历史出现过 {status['failure_items_seen']} 项）",
         f"语义索引：{semantic_text}",
     ])

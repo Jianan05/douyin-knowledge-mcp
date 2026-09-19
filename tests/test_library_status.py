@@ -26,6 +26,9 @@ class LibraryStatusTests(unittest.TestCase):
             review_book.append_event(root / review_book.STATE_NAME, {
                 "video_id": "1", "review_status": "reference",
             })
+            review_book.append_event(root / review_book.IMPACT_QUEUE_NAME, {
+                "event": "queued", "video_id": "1",
+            })
             (root / "_失败记录.jsonl").write_text(
                 "\n".join([
                     json.dumps({"aweme_id": "1", "event": "failed"}),
@@ -46,6 +49,7 @@ class LibraryStatusTests(unittest.TestCase):
             self.assertEqual(status["active_failures"], 1)
             self.assertEqual(status["failure_items_seen"], 2)
             self.assertEqual(status["curated_notes"], 1)
+            self.assertEqual(status["pending_impact_scans"], 1)
             self.assertEqual(status["semantic_index"]["freshness"], "missing")
 
 

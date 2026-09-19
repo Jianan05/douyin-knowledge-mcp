@@ -23,10 +23,60 @@ if str(PROJECT_DIR) not in sys.path:
     sys.path.insert(0, str(PROJECT_DIR))
 
 import semantic_index
+import review_book
 
 
 DEFAULT_LIBRARY = Path.home() / "Desktop" / "DouyinNotes"
 DEFAULT_THRESHOLD = 0.52
+
+
+def pending_reviewed_source_ids(root: Path) -> list[str]:
+    """Return queued, still-eligible sources that have not been scanned."""
+    latest_queue: dict[str, tuple[int, dict]] = {}
+    queue_path = root / review_book.IMPACT_QUEUE_NAME
+    if queue_path.is_file():
+        with queue_path.open(encoding="utf-8") as handle:
+            for position, line in enumerate(handle):
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                source_id = str(event.get("video_id") or "").strip()
+                if source_id and event.get("event") in {"queued", "scan_completed"}:
+                    latest_queue[source_id] = (position, event)
+
+    states = review_book.load_states(root / review_book.STATE_NAME)
+    eligible = review_book.IMPACT_REVIEW_STATES
+    pending = [
+        (position, source_id)
+        for source_id, (position, event) in latest_queue.items()
+        if event.get("event") == "queued"
+        and str((states.get(source_id) or {}).get("review_status") or "") in eligible
+    ]
+    return [source_id for _, source_id in sorted(pending)]
+
+
+def ensure_current_index(root: Path) -> dict:
+    """Build a missing/stale index, reusing unchanged vectors."""
+    try:
+        status = semantic_index.index_status(root, check_freshness=True)
+    except SystemExit:
+        return semantic_index.build_index(root)
+    if status.get("freshness") != "current":
+        return semantic_index.build_index(root)
+    return status
+
+
+def record_completed_scan(root: Path, report: dict, report_path: Path) -> None:
+    for source_id in report["source_ids"]:
+        review_book.append_event(root / review_book.IMPACT_QUEUE_NAME, {
+            "schema_version": 1,
+            "event": "scan_completed",
+            "video_id": source_id,
+            "completed_at": report["generated_at"],
+            "report_path": str(report_path),
+            "index_fingerprint": report.get("index_fingerprint", ""),
+        })
 
 
 def _parse_time(value: str) -> datetime:
@@ -243,7 +293,7 @@ def build_report(
     status = semantic_index.index_status(root, check_freshness=True)
     if status.get("freshness") != "current":
         raise ValueError("语义索引已过期；先运行 semantic_index.py --build")
-    _, rows, vectors = semantic_index.load_index(root)
+    manifest, rows, vectors = semantic_index.load_index(root)
     selected = select_source_ids(rows, source_ids=source_ids, since=since)
     if not selected:
         raise ValueError("指定范围没有找到素材")
@@ -255,6 +305,7 @@ def build_report(
         "threshold": threshold,
         "top_k": top_k,
         "source_ids": selected,
+        "index_fingerprint": manifest.get("source_fingerprint", ""),
         "curated_note_count": len({
             row.get("path") for row in rows if row.get("source_layer") == "curated"
         }),
@@ -269,6 +320,11 @@ def main() -> int:
     selection = parser.add_mutually_exclusive_group(required=True)
     selection.add_argument("--source-id", action="append", default=[])
     selection.add_argument("--since", help="选择该时间及之后采集的素材，如 2026-09-01")
+    selection.add_argument(
+        "--pending-reviewed",
+        action="store_true",
+        help="处理人工审阅后自动进入的待影响扫描队列",
+    )
     parser.add_argument("--threshold", type=float, default=DEFAULT_THRESHOLD)
     parser.add_argument("--top-k", type=int, default=5)
     parser.add_argument("--title", default="新增素材对正式知识的影响候选")
@@ -276,9 +332,16 @@ def main() -> int:
     parser.add_argument("--json", action="store_true", help="同时把完整报告打印为 JSON")
     args = parser.parse_args()
     root = args.dir.expanduser().resolve()
+    selected_source_ids = args.source_id or None
+    if args.pending_reviewed:
+        selected_source_ids = pending_reviewed_source_ids(root)
+        if not selected_source_ids:
+            print("没有待影响扫描的已审阅来源。")
+            return 0
+        ensure_current_index(root)
     report = build_report(
         root,
-        source_ids=args.source_id or None,
+        source_ids=selected_source_ids,
         since=args.since,
         threshold=args.threshold,
         top_k=args.top_k,
@@ -289,6 +352,8 @@ def main() -> int:
     output = output.expanduser().resolve()
     _atomic_write(output, render_markdown(report))
     _atomic_write(output.with_suffix(".json"), json.dumps(report, ensure_ascii=False, indent=2) + "\n")
+    if args.pending_reviewed:
+        record_completed_scan(root, report, output)
     print(f"已生成影响候选：{output}")
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2))

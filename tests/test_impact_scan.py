@@ -9,9 +9,42 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import impact_scan
+import review_book
 
 
 class ImpactScanTests(unittest.TestCase):
+    def test_pending_reviewed_queue_filters_scanned_and_ineligible_sources(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            for source_id, status in (("new", "reference"), ("done", "deep_dive"), ("excluded", "exclude")):
+                review_book.append_event(root / review_book.STATE_NAME, {
+                    "video_id": source_id, "review_status": status,
+                })
+                review_book.append_event(root / review_book.IMPACT_QUEUE_NAME, {
+                    "event": "queued", "video_id": source_id,
+                })
+            impact_scan.record_completed_scan(
+                root,
+                {
+                    "source_ids": ["done"],
+                    "generated_at": "2026-09-19T16:00:00+12:00",
+                    "index_fingerprint": "fingerprint",
+                },
+                root / "report.md",
+            )
+
+            self.assertEqual(impact_scan.pending_reviewed_source_ids(root), ["new"])
+
+            review_book.append_event(root / review_book.IMPACT_QUEUE_NAME, {
+                "event": "queued", "video_id": "done",
+            })
+            self.assertEqual(
+                impact_scan.pending_reviewed_source_ids(root),
+                ["new", "done"],
+            )
+
     def test_select_source_ids_validates_explicit_ids_and_since(self):
         rows = [
             {"video_id": "old", "source_layer": "material", "captured_at": "2026-09-01 10:00:00"},

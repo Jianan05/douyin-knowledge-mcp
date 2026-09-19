@@ -22,6 +22,8 @@ DEFAULT_LIBRARY = Path.home() / "Desktop" / "DouyinNotes"
 STATE_NAME = "_审阅状态.jsonl"
 BOOK_NAME = "_旧收藏整理状态本.md"
 TOMBSTONE_NAME = "_删除标记.jsonl"
+IMPACT_QUEUE_NAME = "_待影响扫描.jsonl"
+IMPACT_REVIEW_STATES = {"reference", "deep_dive"}
 REFERENCE_CLIP_JUDGMENT = "观点视频的嵌入素材音频漏转"
 STATUSES = {
     "pending": "待审阅",
@@ -223,6 +225,7 @@ def deletion_plan(root: Path, video_id: str) -> dict:
             root / "index.jsonl",
             root / "_失败记录.jsonl",
             root / "_待取消收藏.jsonl",
+            root / IMPACT_QUEUE_NAME,
             root / "_内容类型修正.jsonl",
             root / STATE_NAME,
         ],
@@ -548,15 +551,26 @@ def set_status(root: Path, video_id: str, status: str, note: str = "") -> None:
     states = load_states(root / STATE_NAME)
     if video_id not in states:
         raise ValueError(f"状态本中没有作品 {video_id}；先运行 prepare")
+    previous_status = str(states[video_id].get("review_status") or "pending")
+    reviewed_at = _now()
     append_event(root / STATE_NAME, {
         "schema_version": 1,
         "event": "reviewed",
         "video_id": video_id,
         "review_status": normalized,
         "human_note": _flat(note, 2000),
-        "reviewed_at": _now(),
+        "reviewed_at": reviewed_at,
         "review_source": "用户口头或文字确认",
     })
+    if normalized in IMPACT_REVIEW_STATES and previous_status not in IMPACT_REVIEW_STATES:
+        append_event(root / IMPACT_QUEUE_NAME, {
+            "schema_version": 1,
+            "event": "queued",
+            "video_id": video_id,
+            "review_status": normalized,
+            "queued_at": reviewed_at,
+            "reason": "人工审阅进入可用于知识判断的状态",
+        })
     render_book(root)
 
 
