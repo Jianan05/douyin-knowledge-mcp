@@ -458,20 +458,39 @@ def prepare_batch(
     randomize: bool = False,
     batch_id: str | None = None,
     start_order: int = 1,
+    video_ids: list[str] | None = None,
 ) -> list[str]:
     state_path = root / STATE_NAME
     states = load_states(state_path)
     tombstones = load_tombstones(root / TOMBSTONE_NAME)
     risky = known_mapping_risk_ids(root)
+    indexed_rows = load_index(root / "index.jsonl")
     candidates: list[dict] = []
-    for row in load_index(root / "index.jsonl"):
-        video_id = str(row.get("video_id") or "")
-        if video_id in states or video_id in tombstones or video_id in risky:
-            continue
-        note_path = Path(str(row.get("path") or ""))
-        if note_path.is_file():
-            candidates.append(row)
-    if randomize:
+    selection_method = "system_random" if randomize else "index_order"
+    if video_ids is not None:
+        requested = list(dict.fromkeys(str(value).strip() for value in video_ids if str(value).strip()))
+        catalog = {str(row.get("video_id") or ""): row for row in indexed_rows}
+        missing = [video_id for video_id in requested if video_id not in catalog]
+        if missing:
+            raise ValueError("索引中没有作品：" + "、".join(missing))
+        unavailable = [
+            video_id for video_id in requested
+            if video_id in states or video_id in tombstones or video_id in risky
+        ]
+        if unavailable:
+            raise ValueError("作品已在状态本、删除标记或风险清单中：" + "、".join(unavailable))
+        candidates = [catalog[video_id] for video_id in requested]
+        selection_method = "explicit_ids"
+        limit = len(candidates)
+    else:
+        for row in indexed_rows:
+            video_id = str(row.get("video_id") or "")
+            if video_id in states or video_id in tombstones or video_id in risky:
+                continue
+            note_path = Path(str(row.get("path") or ""))
+            if note_path.is_file():
+                candidates.append(row)
+    if randomize and video_ids is None:
         random.SystemRandom().shuffle(candidates)
     batch_id = batch_id or datetime.now().astimezone().strftime("%Y%m%d-%H%M%S-%f")
     chosen: list[str] = []
@@ -486,7 +505,7 @@ def prepare_batch(
                 "video_id": video_id,
                 "review_status": "exclude",
                 "review_batch_id": batch_id,
-                "selection_method": "system_random" if randomize else "index_order",
+                "selection_method": selection_method,
                 "title": _flat(row.get("title"), 500),
                 "url": canonical_url(row),
                 "path": str(note_path),
@@ -504,7 +523,7 @@ def prepare_batch(
             "human_note": "",
             "prepared_at": _now(),
             "review_batch_id": batch_id,
-            "selection_method": "system_random" if randomize else "index_order",
+            "selection_method": selection_method,
             "batch_order": start_order + len(chosen),
             "title": _flat(row.get("title"), 500),
             "url": canonical_url(row),
@@ -678,6 +697,8 @@ def main() -> int:
     prepare = sub.add_parser("prepare", help="抽取下一批尚未进入状态本的旧收藏")
     prepare.add_argument("--limit", type=int, default=15)
     prepare.add_argument("--random", action="store_true", help="使用系统随机源抽取，不按主题或索引优先")
+    prepare_ids_parser = sub.add_parser("prepare-ids", help="按明确作品 ID 准备审阅，不依赖索引顺序")
+    prepare_ids_parser.add_argument("video_ids", nargs="+")
     set_parser = sub.add_parser("set", help="记录一条人工审阅决定")
     set_parser.add_argument("video_id")
     set_parser.add_argument("status")
@@ -698,6 +719,9 @@ def main() -> int:
     if args.command == "prepare":
         chosen = prepare_batch(root, args.limit, randomize=args.random)
         print(f"已准备 {len(chosen)} 条：{root / BOOK_NAME}")
+    elif args.command == "prepare-ids":
+        chosen = prepare_batch(root, video_ids=args.video_ids)
+        print(f"已按指定 ID 准备 {len(chosen)} 条：{root / BOOK_NAME}")
     elif args.command == "set":
         set_status(root, args.video_id, args.status, args.note)
         print(f"已记录 {args.video_id}：{STATUSES[STATUS_ALIASES[args.status]]}")

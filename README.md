@@ -148,6 +148,7 @@ python continuous_favorites.py --target-min 100
 
 ```powershell
 .\runtime\python\python.exe review_book.py prepare --limit 15
+.\runtime\python\python.exe review_book.py prepare-ids <video_id1> <video_id2>
 .\runtime\python\python.exe review_book.py set <video_id> 可参考 --note "为什么值得保留"
 .\runtime\python\python.exe review_book.py set <video_id> 重点深挖 --note "重点看画面和剪辑"
 .\runtime\python\python.exe review_book.py set <video_id> 转录需修正 --note "疑似错词"

@@ -174,6 +174,35 @@ class ReviewBookTests(unittest.TestCase):
             self.assertNotIn("10000000003", states)
             self.assertEqual(states["10000000002"]["selection_method"], "system_random")
 
+    def test_prepare_specific_ids_preserves_requested_order(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._library(root)
+
+            chosen = rb.prepare_batch(
+                root,
+                video_ids=["10000000002", "10000000001", "10000000002"],
+            )
+
+            self.assertEqual(chosen, ["10000000002", "10000000001"])
+            states = rb.load_states(root / rb.STATE_NAME)
+            self.assertEqual(states["10000000002"]["batch_order"], 1)
+            self.assertEqual(states["10000000001"]["batch_order"], 2)
+            self.assertTrue(all(
+                states[video_id]["selection_method"] == "explicit_ids"
+                for video_id in chosen
+            ))
+
+    def test_prepare_specific_ids_rejects_unknown_or_existing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._library(root)
+            with self.assertRaisesRegex(ValueError, "索引中没有作品"):
+                rb.prepare_batch(root, video_ids=["missing"])
+            rb.prepare_batch(root, video_ids=["10000000001"])
+            with self.assertRaisesRegex(ValueError, "已在状态本"):
+                rb.prepare_batch(root, video_ids=["10000000001"])
+
     def test_unreadable_candidate_is_rejected_and_replaced(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
