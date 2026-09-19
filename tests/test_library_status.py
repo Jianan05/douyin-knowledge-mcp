@@ -50,6 +50,8 @@ class LibraryStatusTests(unittest.TestCase):
             self.assertEqual(status["failure_items_seen"], 2)
             self.assertEqual(status["curated_notes"], 1)
             self.assertEqual(status["pending_impact_scans"], 1)
+            self.assertEqual(status["correction_candidates"], 0)
+            self.assertEqual(status["active_corrections"], 0)
             self.assertEqual(status["semantic_index"]["freshness"], "missing")
 
 

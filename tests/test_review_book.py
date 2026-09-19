@@ -127,6 +127,13 @@ class ReviewBookTests(unittest.TestCase):
             package = root / "_source_packages" / "10000000001.json"
             package.parent.mkdir()
             package.write_text('{"raw_text":"原始内容"}', encoding="utf-8")
+            correction = root / "_corrections" / "10000000001" / "v0001.md"
+            correction.parent.mkdir(parents=True)
+            correction.write_text("修正版正文", encoding="utf-8")
+            (root / "_correction_events.jsonl").write_text(
+                json.dumps({"video_id": "10000000001", "event": "correction_created"}) + "\n",
+                encoding="utf-8",
+            )
             asset = root / "assets" / "10000000001" / "frame.jpg"
             asset.parent.mkdir(parents=True)
             asset.write_bytes(b"image")
@@ -147,6 +154,8 @@ class ReviewBookTests(unittest.TestCase):
             self.assertFalse((root / "inbox" / "douyin_10000000001.md").exists())
             self.assertTrue((root / "inbox" / "douyin_10000000002.md").is_file())
             self.assertFalse(package.exists())
+            self.assertFalse(correction.parent.exists())
+            self.assertEqual((root / "_correction_events.jsonl").read_text(encoding="utf-8"), "")
             self.assertFalse(asset.parent.exists())
             calibration_text = calibration.read_text(encoding="utf-8")
             self.assertNotIn("10000000001", calibration_text)
@@ -155,7 +164,7 @@ class ReviewBookTests(unittest.TestCase):
             marker = json.loads((root / rb.TOMBSTONE_NAME).read_text(encoding="utf-8"))
             self.assertEqual(set(marker), {"schema_version", "video_id", "status", "deleted_at"})
             self.assertTrue(ingest.Library(root).is_deleted("10000000001"))
-            self.assertEqual(result["removed_rows"], 3)
+            self.assertEqual(result["removed_rows"], 4)
 
     def test_confirmed_mapping_mismatch_is_preserved_but_excluded(self):
         with tempfile.TemporaryDirectory() as tmp:

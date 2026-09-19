@@ -15,6 +15,7 @@ if str(PROJECT_DIR) not in sys.path:
 import review_book
 import semantic_index
 import impact_scan
+import transcript_correction
 
 
 DEFAULT_LIBRARY = Path.home() / "Desktop" / "DouyinNotes"
@@ -45,6 +46,8 @@ def library_status(root: Path, check_semantic: bool = False) -> dict:
     )
     failures = _latest_failures(root / "_失败记录.jsonl")
     active_failures = sum(row.get("event") == "failed" for row in failures.values())
+    correction_events = transcript_correction.load_events(root / transcript_correction.EVENTS_NAME)
+    active_corrections = transcript_correction.load_active_corrections(root)
     notes_dir = root / "notes"
     source_packages = root / "_source_packages"
     assets = root / "assets"
@@ -90,6 +93,10 @@ def library_status(root: Path, check_semantic: bool = False) -> dict:
             1 for line in (root / "_knowledge_events.jsonl").read_text(encoding="utf-8").splitlines()
             if line.strip()
         ) if (root / "_knowledge_events.jsonl").is_file() else 0,
+        "correction_candidates": sum(
+            event.get("event") == "correction_created" for event in correction_events
+        ),
+        "active_corrections": len(active_corrections),
         "pending_impact_scans": len(impact_scan.pending_reviewed_source_ids(root)),
         "active_failures": active_failures,
         "failure_items_seen": len(failures),
@@ -113,6 +120,7 @@ def render_status(status: dict) -> str:
         f"人工审阅：{status['reviewed_items']}（{status['review_coverage_percent']}%）；{review_text}",
         f"精选知识：{status['curated_notes']} 条；确认事件：{status['knowledge_events']}；"
         f"待影响扫描：{status['pending_impact_scans']} 条",
+        f"转录修正版：候选 {status['correction_candidates']} 个；当前生效 {status['active_corrections']} 个",
         f"当前失败项：{status['active_failures']}（历史出现过 {status['failure_items_seen']} 项）",
         f"语义索引：{semantic_text}",
     ])

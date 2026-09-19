@@ -210,6 +210,7 @@ def deletion_plan(root: Path, video_id: str) -> dict:
     for candidate in (
         root / "_source_packages" / f"{video_id}.json",
         root / "assets" / video_id,
+        root / "_corrections" / video_id,
     ):
         if candidate.exists():
             paths.add(candidate.resolve())
@@ -227,6 +228,7 @@ def deletion_plan(root: Path, video_id: str) -> dict:
             root / "_待取消收藏.jsonl",
             root / IMPACT_QUEUE_NAME,
             root / "_内容类型修正.jsonl",
+            root / "_correction_events.jsonl",
             root / STATE_NAME,
         ],
         "vector_caches": [PROJECT / "data" / "chunk_vectors.npz", PROJECT / "data" / "embeddings.npz"],
@@ -544,7 +546,14 @@ def prepare_batch(
     return chosen
 
 
-def set_status(root: Path, video_id: str, status: str, note: str = "") -> None:
+def set_status(
+    root: Path,
+    video_id: str,
+    status: str,
+    note: str = "",
+    *,
+    source: str = "用户口头或文字确认",
+) -> None:
     normalized = STATUS_ALIASES.get(status)
     if not normalized:
         raise ValueError("状态必须是：" + " / ".join(STATUSES.values()))
@@ -560,7 +569,7 @@ def set_status(root: Path, video_id: str, status: str, note: str = "") -> None:
         "review_status": normalized,
         "human_note": _flat(note, 2000),
         "reviewed_at": reviewed_at,
-        "review_source": "用户口头或文字确认",
+        "review_source": _flat(source, 500),
     })
     if normalized in IMPACT_REVIEW_STATES and previous_status not in IMPACT_REVIEW_STATES:
         append_event(root / IMPACT_QUEUE_NAME, {

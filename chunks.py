@@ -107,6 +107,8 @@ def chunk_file(path: Path) -> list[dict]:
 
 
 def chunk_library(root: Path) -> list[dict]:
+    from transcript_correction import load_active_corrections
+
     review_states: dict[str, str] = {}
     review_path = root / "_审阅状态.jsonl"
     if review_path.is_file():
@@ -132,6 +134,7 @@ def chunk_library(root: Path) -> list[dict]:
                 if marker.get("status") == "deleted" and marker.get("video_id"):
                     tombstones.add(str(marker["video_id"]))
 
+    active_corrections = load_active_corrections(root)
     rows = []
     for sub in ("inbox", "notes"):
         for f in sorted((root / sub).rglob("*.md")):
@@ -140,6 +143,12 @@ def chunk_library(root: Path) -> list[dict]:
                 continue
             video_id = str(file_rows[0].get("video_id") or "")
             source_layer = "curated" if sub == "notes" else "material"
+            correction = active_corrections.get(video_id) if source_layer == "material" else None
+            if correction:
+                corrected_path = Path(str(correction["correction_path"]))
+                corrected_rows = chunk_file(corrected_path)
+                if corrected_rows:
+                    file_rows = corrected_rows
             review_status = (
                 str(file_rows[0].get("knowledge_status") or "confirmed")
                 if source_layer == "curated"
@@ -150,5 +159,8 @@ def chunk_library(root: Path) -> list[dict]:
             for row in file_rows:
                 row["review_status"] = review_status
                 row["source_layer"] = source_layer
+                if correction:
+                    row["original_path"] = str(f)
+                    row["correction_version"] = int(correction["version"])
             rows.extend(file_rows)
     return rows

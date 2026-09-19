@@ -89,6 +89,8 @@ def prepare_rows(root: Path, source_rows: Iterable[dict] | None = None) -> tuple
             "captured_at": str(extra.get("at") or ""),
             "duration_seconds": extra.get("duration"),
             "quality_warning": status in {"needs_correction", "pending"},
+            "original_path": str(row.get("original_path") or ""),
+            "correction_version": row.get("correction_version"),
         }
         prepared.append(item)
     return prepared, excluded

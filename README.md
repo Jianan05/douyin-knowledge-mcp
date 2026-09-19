@@ -165,6 +165,32 @@ python continuous_favorites.py --target-min 100
 
 状态采用追加式 `_审阅状态.jsonl`，可读视图是 `_旧收藏整理状态本.md`。“不纳入知识库”只让 chunk/RAG 跳过该作品，不删除文件、不取消收藏。
 
+标为“转录需修正”的作品使用独立、带版本的校正流程。先把核对后的纯正文保存到一个 UTF-8 文本文件，再创建候选版本：
+
+```powershell
+.\runtime\python\python.exe transcript_correction.py create <video_id> `
+  --text-file corrected.txt `
+  --basis "逐句对照原视频和字幕（强）" `
+  --corrected-by "审核人"
+```
+
+候选文件保存在 `_corrections/<video_id>/v0001.md`，原始 Markdown 不会被覆盖，未批准的候选也不会进入 chunk 或语义索引。人工核对候选后显式批准：
+
+```powershell
+.\runtime\python\python.exe transcript_correction.py approve <video_id> 1 `
+  --status reference `
+  --approved-by "审核人" `
+  --note "修正版核对通过"
+```
+
+批准时会同时校验原稿与修正版哈希；原稿在候选生成后有变化时会拒绝批准。生效后，下游只使用修正版，事件日志仍保留原稿路径、哈希、版本、依据和审批人。需要回退时使用 `revoke`，它只追加撤销事件并恢复原稿作为下游视图，不删除任何版本：
+
+```powershell
+.\runtime\python\python.exe transcript_correction.py revoke <video_id> `
+  --note "发现校正依据不足" `
+  --revoked-by "审核人"
+```
+
 “彻底删除”是不同动作，必须先申请，再用完全一致的视频 ID 二次确认：
 
 ```powershell
