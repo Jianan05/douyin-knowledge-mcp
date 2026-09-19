@@ -135,6 +135,38 @@ class LibraryQueueTests(unittest.TestCase):
             self.assertFalse(lib.pending_uncollect_path.exists())
 
 
+class RepairFavoriteTests(unittest.TestCase):
+    def test_single_repair_stops_inventory_after_target_is_seen(self):
+        target = {"aweme_id": "wanted", "desc": "目标作品"}
+        args = SimpleNamespace(
+            repair_favorite="wanted",
+            no_screen=False,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            lib = ingest.Library(Path(tmp))
+            with (
+                patch.object(
+                    dc,
+                    "fetch_favorites",
+                    new=AsyncMock(return_value=({"name": "全部收藏"}, [target])),
+                ) as fetch,
+                patch.object(
+                    ingest,
+                    "_ingest_collected_item",
+                    new=AsyncMock(return_value="[ok] wanted | 已保存"),
+                ),
+            ):
+                result = asyncio.run(
+                    ingest.cmd_repair_favorite(args, lib, "medium")
+                )
+
+        self.assertEqual(result, 0)
+        fetch.assert_awaited_once_with(
+            require_exhausted=False,
+            stop_aweme_id="wanted",
+        )
+
+
 class TranscriptionProgressTests(unittest.TestCase):
     def test_progress_lock_falls_back_without_interrupting_transcription(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -264,7 +264,7 @@ async def list_collections() -> list[dict]:
 
 async def fetch_favorites(
     max_scroll: int = 1000, allow_empty: bool = False, require_exhausted: bool = True,
-    stale_limit: int = 20,
+    stale_limit: int = 20, stop_aweme_id: str = "",
 ) -> tuple[dict, list[dict]]:
     """滚完“收藏”总列表，返回全部视频、图文和纯文字作品。
 
@@ -296,6 +296,8 @@ async def fetch_favorites(
                     or collector.all_has_more == 0
                 ):
                     break
+            if stop_aweme_id and stop_aweme_id in bucket:
+                break
             cursor = (
                 str(collector.all_cursor)
                 if collector.all_cursor is not None

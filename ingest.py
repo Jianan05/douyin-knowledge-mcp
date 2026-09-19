@@ -1995,7 +1995,10 @@ async def cmd_repair_favorite(args, lib: Library, model: str) -> int:
     import douyin_collects as dc
 
     target_id = str(args.repair_favorite)
-    _, items = await dc.fetch_favorites(require_exhausted=False)
+    _, items = await dc.fetch_favorites(
+        require_exhausted=False,
+        stop_aweme_id=target_id,
+    )
     item = next((row for row in items if row.get("aweme_id") == target_id), None)
     if not item:
         print(f"[fail] {target_id} | 当前已加载的收藏列表里没有找到该作品")
