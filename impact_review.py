@@ -144,6 +144,10 @@ def save_decision(root: Path, payload: dict, report_path: Path | None = None) ->
         "report_path": str(path),
         "source_id": item["source_id"],
         "note_path": item["note_path"],
+        "note_sha256": (
+            hashlib.sha256(Path(item["note_path"]).read_bytes()).hexdigest()
+            if Path(item["note_path"]).is_file() else ""
+        ),
         "relation": relation,
         "action": action,
         "note": str(payload.get("note") or "").strip()[:4000],

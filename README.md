@@ -223,6 +223,20 @@ python continuous_favorites.py --target-min 100
 
 页面会读取最新的非作废影响报告，把关系判断追加到 `_impact_review_events.jsonl`，并可生成 `_讨论工作区/知识修改草案/` 下的讨论稿。讨论稿带机器路由与人工判断来源标记，但不会改写 `notes/`；正式知识仍须通过显式用户确认门。
 
+用户明确确认草案后，可按审核页产生的候选 ID 安全更新现有正式知识：
+
+```powershell
+.\runtime\python\python.exe knowledge_update.py `
+  --candidate-id <candidate_id> `
+  --text "确认后的补充或替代文字" `
+  --rationale "为什么更新" `
+  --scope "更新后的适用范围" `
+  --confirmed-by "确认人" `
+  --user-confirmed
+```
+
+命令只接受已保存的影响判断，并校验正式笔记自审核以来未被修改。`supplement` 会保留原结论并追加补充；`supersede` 会把旧结论完整保存在“更新历史”中并标记 `❌ 作废`；`new_topic` 必须另走新建正式知识流程。每次成功更新都会追加知识事件和前后文件哈希，不能静默覆盖或重复应用。
+
 ### 7. 视觉校准与审计
 
 ```powershell
