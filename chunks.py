@@ -6,8 +6,11 @@
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
+
+from note_sections import clean_screenshot_ocr, is_technical_failure_placeholder, transcript_section
 
 TARGET = 400      # 目标长度（字），bge-m3 上 300~500 字的块检索效果最稳
 MAX_CHARS = 700   # 硬上限，超了就切
@@ -19,7 +22,7 @@ _IMG_HEAD = re.compile(r"^### 图 \d+", re.M)
 
 def _front_matter(text: str) -> dict:
     meta = {}
-    for key in ("title", "video_id", "source", "category", "platform"):
+    for key in ("title", "video_id", "source", "category", "platform", "knowledge_status"):
         m = re.search(rf'^{key}: "?(.*?)"?$', text, re.M)
         if m:
             meta[key] = m.group(1)
@@ -60,7 +63,13 @@ def split_text(body: str) -> list[str]:
 def chunk_file(path: Path) -> list[dict]:
     text = path.read_text(encoding="utf-8")
     meta = _front_matter(text)
-    body = text.split("## 转写稿", 1)[-1]
+    extracted = transcript_section(text)
+    body = extracted if extracted is not None else text
+    # 截图 OCR 采用旁路清洗：检索使用清洗文本，原 Markdown 永不改写。
+    body = clean_screenshot_ocr(body)["cleaned_text"]
+    # 旧稿可能把 OCR 异常名写进转写章节；技术占位符绝不能进入知识库。
+    if is_technical_failure_placeholder(body):
+        body = ""
     # 正文顶部那行「🔗 在抖音打开原视频」和引用的 desc 不是内容，去掉
     body = re.sub(r"^🔗 .*$", "", body, flags=re.M)
     body = re.sub(r"^> .*$", "", body, flags=re.M).strip()
@@ -73,6 +82,7 @@ def chunk_file(path: Path) -> list[dict]:
             "category": meta.get("category", ""),
             "tags": meta.get("tags", []),
             "source": meta.get("source", ""),
+            "knowledge_status": meta.get("knowledge_status", ""),
             "path": str(path),
             "idx": i,
             "text": piece,
@@ -81,8 +91,48 @@ def chunk_file(path: Path) -> list[dict]:
 
 
 def chunk_library(root: Path) -> list[dict]:
+    review_states: dict[str, str] = {}
+    review_path = root / "_审阅状态.jsonl"
+    if review_path.is_file():
+        with review_path.open(encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                video_id = str(event.get("video_id") or "")
+                status = str(event.get("review_status") or "")
+                if video_id and status:
+                    review_states[video_id] = status
+    tombstones: set[str] = set()
+    tombstone_path = root / "_删除标记.jsonl"
+    if tombstone_path.is_file():
+        with tombstone_path.open(encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    marker = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if marker.get("status") == "deleted" and marker.get("video_id"):
+                    tombstones.add(str(marker["video_id"]))
+
     rows = []
     for sub in ("inbox", "notes"):
         for f in sorted((root / sub).rglob("*.md")):
-            rows.extend(chunk_file(f))
+            file_rows = chunk_file(f)
+            if not file_rows:
+                continue
+            video_id = str(file_rows[0].get("video_id") or "")
+            source_layer = "curated" if sub == "notes" else "material"
+            review_status = (
+                str(file_rows[0].get("knowledge_status") or "confirmed")
+                if source_layer == "curated"
+                else review_states.get(video_id, "pending")
+            )
+            if review_status == "exclude" or video_id in tombstones:
+                continue
+            for row in file_rows:
+                row["review_status"] = review_status
+                row["source_layer"] = source_layer
+            rows.extend(file_rows)
     return rows

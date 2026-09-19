@@ -55,6 +55,16 @@ Whisper 模型大小可用 `--model tiny|base|small|medium|large-v3` 指定；�
 
 ## 快速使用
 
+### 0. 不使用私人数据的知识闭环演示
+
+这条命令只使用项目自带的合成文字，演示“来源 → 人工审阅 → 已确认知识”的状态和溯源关系；不会访问抖音、Cookie 或默认知识库：
+
+```powershell
+.\runtime\python\python.exe demo_workflow.py
+```
+
+命令会在系统临时目录生成原始材料、审阅状态本、确认事件和一条 `notes/` 正式笔记，并输出各文件路径。演示中的人工确认是明确标注的固定测试夹具，不冒充真实用户判断。
+
 ### 1. 登录抖音
 
 首次使用或登录过期时，打开本项目专用的持久化 Chromium profile：
@@ -124,7 +134,65 @@ $env:DOUYIN_NOTES_DIR = "D:\Knowledge\Douyin"
 python continuous_favorites.py --target-min 100
 ```
 
-### 5. 视觉校准与审计
+### 5. 旧收藏小批量审阅
+
+直接复用本地已有转录，不会重新转录整库：
+
+```powershell
+.\runtime\python\python.exe review_book.py prepare --limit 15
+.\runtime\python\python.exe review_book.py set <video_id> 可参考 --note "为什么值得保留"
+.\runtime\python\python.exe review_book.py set <video_id> 重点深挖 --note "重点看画面和剪辑"
+.\runtime\python\python.exe review_book.py set <video_id> 转录需修正 --note "疑似错词"
+.\runtime\python\python.exe review_book.py set <video_id> 不纳入知识库 --note "与目标无关"
+```
+
+需要直接点击操作时，启动只显示首批 15 条的本地审阅页：
+
+```powershell
+.\runtime\python\python.exe review_ui.py
+```
+
+然后打开 `http://127.0.0.1:8765/`。按钮与备注仍追加写入同一个 `_审阅状态.jsonl`；页面只有“申请删除”，没有真实删除接口。
+
+状态采用追加式 `_审阅状态.jsonl`，可读视图是 `_旧收藏整理状态本.md`。“不纳入知识库”只让 chunk/RAG 跳过该作品，不删除文件、不取消收藏。
+
+“彻底删除”是不同动作，必须先申请，再用完全一致的视频 ID 二次确认：
+
+```powershell
+.\runtime\python\python.exe review_book.py set <video_id> 彻底删除 --note "删除原因"
+.\runtime\python\python.exe review_book.py delete <video_id> --confirm-video-id <video_id>
+```
+
+执行后会删除可精确归属的原稿、来源包、视觉资产、索引/失败队列记录并使 chunk 向量缓存失效，只留下不含原始内容的 `_删除标记.jsonl`，防止午夜收藏同步重新入库。旧的人工综合话题稿缺少来源 ID 映射，命令会明确警告，不能声称已自动清除其中无法追溯的改写内容。
+
+### 6. 把人工确认的结论写入精选知识库
+
+只有已经审为“可参考”或“重点深挖”的来源才能支持正式笔记，并且必须显式声明用户已经确认：
+
+```powershell
+.\runtime\python\python.exe knowledge_notes.py `
+  --title "结论标题" `
+  --conclusion "用户明确确认的结论" `
+  --source-id <video_id> `
+  --rationale "为什么形成这个结论" `
+  --scope "适用范围" `
+  --confirmed-by "用户姓名或标识" `
+  --user-confirmed
+```
+
+命令会在 `notes/` 新建带来源 ID、确认时间和推导依据的笔记，并追加 `_knowledge_events.jsonl`。它不会自动摘要原稿，也不会覆盖同名正式笔记。
+
+语义索引会给原始素材标记 `source_layer=material`，给正式笔记标记 `source_layer=curated`。可分别检索，也可跨层比较：
+
+```powershell
+.\runtime\python\python.exe semantic_index.py --build
+.\runtime\python\python.exe semantic_index.py --status
+.\runtime\python\python.exe semantic_index.py --query "具体问题" --layer curated
+```
+
+索引更新按正文哈希复用未变化的向量；`--status` 会扫描当前素材并明确报告 `current` 或 `stale`。
+
+### 7. 视觉校准与审计
 
 ```powershell
 # 先看抽样清单，不下载、不取消收藏

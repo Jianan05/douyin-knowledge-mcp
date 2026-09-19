@@ -193,12 +193,31 @@ class Library:
         self.failure_events_path = root / "_失败记录.jsonl"
         self.failure_report_path = root / "_失败记录.md"
         self.type_overrides_path = root / "_内容类型修正.jsonl"
+        self.deleted_markers_path = root / "_删除标记.jsonl"
         for directory in (self.inbox, self.notes, self.unsorted, self.source_packages):
             directory.mkdir(parents=True, exist_ok=True)
         self._write_failure_report()
         self._ensure_progress_file()
         self._seen = self._load_index()
         self._type_overrides = self._load_type_overrides()
+        self._deleted_ids = self._load_deleted_ids()
+
+    def _load_deleted_ids(self) -> set[str]:
+        deleted: set[str] = set()
+        if not self.deleted_markers_path.is_file():
+            return deleted
+        with self.deleted_markers_path.open(encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if row.get("status") == "deleted" and row.get("video_id"):
+                    deleted.add(str(row["video_id"]))
+        return deleted
+
+    def is_deleted(self, video_id: str) -> bool:
+        return str(video_id or "") in self._deleted_ids
 
     def _load_type_overrides(self) -> dict[str, dict]:
         overrides: dict[str, dict] = {}
@@ -1610,6 +1629,13 @@ async def cmd_favorites(args, lib: Library, model: str) -> int:
         return 1
 
     items = [lib.apply_type_override(item) for item in items]
+    deleted_count = sum(lib.is_deleted(item.get("aweme_id") or "") for item in items)
+    if deleted_count:
+        print(
+            f"[info] 已按防回灌删除标记跳过 {deleted_count} 条，不会重新入库。",
+            flush=True,
+        )
+        items = [item for item in items if not lib.is_deleted(item.get("aweme_id") or "")]
 
     inventory_complete = bool(info.get("complete"))
     invalid_item_count = int(info.get("invalid_item_count") or 0)

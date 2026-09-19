@@ -3,8 +3,10 @@
 
 设计要点
 --------
-1. 专用 profile（``data/douyin-browser-profile``），和用户日常 Chrome/Edge 完全隔离，
-   也不读取它们的 Cookie。用户只需首次在可见窗口里扫码登录一次，之后复用同一 profile。
+1. 默认使用本机 Microsoft Edge，并配套独立 profile
+   （``data/douyin-browser-msedge-profile``）。它和用户日常 Edge 完全隔离，也不读取日常
+   Cookie；用户只需首次在可见窗口里登录一次，之后复用同一 profile。
+   可用 ``DOUYIN_BROWSER_CHANNEL`` 切换为 ``chromium`` 或 ``chrome``。
 2. 抓取时不再只等一个 API 名字，而是同时收集四路信号：
      - ``aweme/detail`` 等返回 JSON 结构的响应；
      - 响应 ``Content-Type`` 为 ``video/*`` ``audio/*`` 或 URL 形如 mp4/m4a/m3u8 的媒体响应；
@@ -19,6 +21,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 import time
 from pathlib import Path
@@ -27,7 +30,24 @@ from urllib.parse import urlparse, urlsplit
 from playwright.async_api import async_playwright
 
 BASE_DIR = Path(__file__).resolve().parent
-PROFILE_DIR = BASE_DIR / "data" / "douyin-browser-profile"
+
+
+def _normalize_browser_channel(value: str | None) -> str:
+    """把用户友好的浏览器名规范成 Playwright channel。"""
+    channel = (value or "msedge").strip().lower()
+    aliases = {"edge": "msedge", "microsoft-edge": "msedge"}
+    channel = aliases.get(channel, channel)
+    if channel not in {"msedge", "chrome", "chromium"}:
+        raise ValueError(
+            "DOUYIN_BROWSER_CHANNEL 只支持 msedge/edge、chrome 或 chromium"
+        )
+    return channel
+
+
+BROWSER_CHANNEL = _normalize_browser_channel(os.environ.get("DOUYIN_BROWSER_CHANNEL"))
+# 不直接复用日常浏览器 profile：运行中的 Edge 会锁文件，而且读取日常 Cookie 风险太大。
+# 每个浏览器 channel 使用自己的专用 profile，避免不同内核版本互相污染。
+PROFILE_DIR = BASE_DIR / "data" / f"douyin-browser-{BROWSER_CHANNEL}-profile"
 
 # 登录态判定用的 Cookie 名（只看是否存在，不读取值）。
 _LOGIN_COOKIE_NAMES = ("sessionid", "sessionid_ss", "sid_tt", "passport_auth_status")
@@ -250,9 +270,9 @@ class DouyinSession:
             self.context = await self._pw.chromium.launch_persistent_context(
                 user_data_dir=str(PROFILE_DIR),
                 headless=self.headless,
-                # 必须用完整 Chromium（新版 headless），旧的 headless_shell 拿不到媒体：
+                # 必须用完整浏览器（新版 headless），旧的 headless_shell 拿不到媒体：
                 # 抖音在 headless shell 里根本不给 video 元素喂流（实测 readyState 一直是 0）。
-                channel="chromium",
+                channel=BROWSER_CHANNEL,
                 slow_mo=self.slow_mo,
                 user_agent=_DESKTOP_UA,
                 locale="zh-CN",
@@ -267,11 +287,12 @@ class DouyinSession:
             )
         except Exception as exc:
             await self._shutdown()
+            label = "Microsoft Edge" if BROWSER_CHANNEL == "msedge" else BROWSER_CHANNEL
             raise DouyinBrowserError(
                 STAGE_LOGIN,
-                f"无法启动 Playwright Chromium（{type(exc).__name__}）",
-                "先运行 playwright install chromium；若使用可选 runtime，确认其中的 "
-                "Chromium 完整，或关闭已经打开的同一个 profile 窗口后重试",
+                f"无法启动专用 {label}（{type(exc).__name__}）",
+                f"确认 {label} 已安装；或关闭已经打开的同一个专用 profile 窗口后重试。"
+                "也可设置 DOUYIN_BROWSER_CHANNEL=chromium 改用项目内 Chromium",
             ) from exc
         await self.context.add_init_script(_STEALTH_JS)
         return self
