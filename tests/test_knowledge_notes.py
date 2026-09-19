@@ -72,6 +72,9 @@ class KnowledgeNotesTests(unittest.TestCase):
             self.assertTrue(curated_rows)
             self.assertTrue(all(row["source_layer"] == "curated" for row in curated_rows))
             self.assertTrue(all(row["review_status"] == "confirmed" for row in curated_rows))
+            self.assertTrue(all(row["source_ids"] == ["123"] for row in curated_rows))
+            self.assertNotIn("公开测试来源", "".join(row["text"] for row in curated_rows))
+            self.assertNotIn("本地来源", "".join(row["text"] for row in curated_rows))
             event = json.loads((root / kn.EVENTS_NAME).read_text(encoding="utf-8"))
             self.assertEqual(event["source_ids"], ["123"])
             with self.assertRaises(FileExistsError):
@@ -85,6 +88,21 @@ class KnowledgeNotesTests(unittest.TestCase):
                     confirmed_by="测试用户",
                     user_confirmed=True,
                 )
+
+    def test_malformed_confirmed_note_does_not_embed_traceability_metadata(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "malformed.md"
+            path.write_text(
+                "---\n"
+                "title: \"错误格式\"\n"
+                "knowledge_status: \"confirmed\"\n"
+                "source_ids: [\"123\"]\n"
+                "---\n\n"
+                "## 来源与可追溯性\n\n"
+                "本地来源：C:\\\\secret\\\\source.md\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(chunks.chunk_file(path), [])
 
 
 if __name__ == "__main__":

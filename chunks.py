@@ -10,7 +10,12 @@ import json
 import re
 from pathlib import Path
 
-from note_sections import clean_screenshot_ocr, is_technical_failure_placeholder, transcript_section
+from note_sections import (
+    clean_screenshot_ocr,
+    curated_knowledge_text,
+    is_technical_failure_placeholder,
+    transcript_section,
+)
 
 TARGET = 400      # 目标长度（字），bge-m3 上 300~500 字的块检索效果最稳
 MAX_CHARS = 700   # 硬上限，超了就切
@@ -28,6 +33,8 @@ def _front_matter(text: str) -> dict:
             meta[key] = m.group(1)
     m = re.search(r'^tags: \[(.*)\]', text, re.M)
     meta["tags"] = re.findall(r'"([^"]*)"', m.group(1)) if m else []
+    m = re.search(r'^source_ids: \[(.*)\]', text, re.M)
+    meta["source_ids"] = re.findall(r'"([^"]*)"', m.group(1)) if m else []
     return meta
 
 
@@ -63,8 +70,16 @@ def split_text(body: str) -> list[str]:
 def chunk_file(path: Path) -> list[dict]:
     text = path.read_text(encoding="utf-8")
     meta = _front_matter(text)
-    extracted = transcript_section(text)
-    body = extracted if extracted is not None else text
+    is_confirmed_knowledge = meta.get("knowledge_status") == "confirmed"
+    extracted = (
+        curated_knowledge_text(text)
+        if is_confirmed_knowledge
+        else transcript_section(text)
+    )
+    # Confirmed notes have a strict semantic surface.  If their expected
+    # sections are missing, exclude them instead of embedding front matter,
+    # source paths and traceability boilerplate by accident.
+    body = extracted if extracted is not None else ("" if is_confirmed_knowledge else text)
     # 截图 OCR 采用旁路清洗：检索使用清洗文本，原 Markdown 永不改写。
     body = clean_screenshot_ocr(body)["cleaned_text"]
     # 旧稿可能把 OCR 异常名写进转写章节；技术占位符绝不能进入知识库。
@@ -83,6 +98,7 @@ def chunk_file(path: Path) -> list[dict]:
             "tags": meta.get("tags", []),
             "source": meta.get("source", ""),
             "knowledge_status": meta.get("knowledge_status", ""),
+            "source_ids": meta.get("source_ids", []),
             "path": str(path),
             "idx": i,
             "text": piece,

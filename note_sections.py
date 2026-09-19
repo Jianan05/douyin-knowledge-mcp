@@ -7,6 +7,7 @@ import re
 
 _TRANSCRIPT_HEADING = re.compile(r"^##\s+转写稿\s*$", re.MULTILINE)
 _NEXT_LEVEL_TWO_HEADING = re.compile(r"^##\s+.+$", re.MULTILINE)
+_LEVEL_TWO_SECTION = re.compile(r"^##\s+(.+?)\s*$", re.MULTILINE)
 _IMAGE_HEADING = re.compile(r"^\s*###\s*图\s*\d+\s*$")
 _FOLLOW_CONTROL = re.compile(r"^\s*(?:[+＋十]\s*关注|已关注)\s*$")
 _FOLLOWER_COUNT = re.compile(
@@ -35,6 +36,27 @@ def transcript_section(text: str) -> str | None:
     next_heading = _NEXT_LEVEL_TWO_HEADING.search(text, start)
     end = next_heading.start() if next_heading else len(text)
     return text[start:end].strip()
+
+
+def curated_knowledge_text(text: str) -> str | None:
+    """Extract semantic content from generated confirmed notes.
+
+    Source lists and traceability boilerplate remain in the Markdown file but
+    are excluded from embeddings so source IDs, titles and paths do not create
+    artificial impact matches.
+    """
+    allowed = {"已确认结论", "形成理由", "适用范围"}
+    matches = list(_LEVEL_TWO_SECTION.finditer(text))
+    selected: list[str] = []
+    for index, match in enumerate(matches):
+        title = match.group(1).strip()
+        if title not in allowed:
+            continue
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        body = text[match.end():end].strip()
+        if body:
+            selected.append(f"## {title}\n\n{body}")
+    return "\n\n".join(selected) if selected else None
 
 
 def is_technical_failure_placeholder(text: str) -> bool:

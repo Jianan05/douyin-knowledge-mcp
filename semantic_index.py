@@ -85,6 +85,7 @@ def prepare_rows(root: Path, source_rows: Iterable[dict] | None = None) -> tuple
             "tags": list(row.get("tags") or extra.get("tags") or []),
             "review_status": status,
             "source_layer": str(row.get("source_layer") or "material"),
+            "source_ids": list(row.get("source_ids") or []),
             "captured_at": str(extra.get("at") or ""),
             "duration_seconds": extra.get("duration"),
             "quality_warning": status in {"needs_correction", "pending"},

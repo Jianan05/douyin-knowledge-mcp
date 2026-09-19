@@ -201,6 +201,17 @@ python continuous_favorites.py --target-min 100
 
 索引更新按正文哈希复用未变化的向量；`--status` 会扫描当前素材并明确报告 `current` 或 `stale`。
 
+已有正式知识后，可以用明确来源 ID 或采集时间生成“可能受影响专题”报告：
+
+```powershell
+.\runtime\python\python.exe impact_scan.py `
+  --source-id <video_id1> --source-id <video_id2>
+
+.\runtime\python\python.exe impact_scan.py --since 2026-09-01
+```
+
+命令会同时写 Markdown 讨论包和 JSON 机器报告。正式笔记 `source_ids` 中已有的来源会直接标为 `already_incorporated`；其余来源的相似度只用于候选路由，`duplicate / supports / refines / contradicts / unrelated` 必须人工核对后填写。报告不会直接修改正式知识。
+
 ### 7. 视觉校准与审计
 
 ```powershell
