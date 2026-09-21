@@ -66,6 +66,9 @@ class PublicMediaDemoTests(unittest.TestCase):
             self.assertTrue(Path(manifest["sources"][0]["source_package"]).is_file())
             note = Path(result["knowledge_note"]).read_text(encoding="utf-8")
             self.assertIn('knowledge_status: "confirmed"', note)
+            self.assertIn(public_media_demo.AUDIO_SOURCE, note)
+            self.assertIn("fixture://public-demo/text-card.png", note)
+            self.assertNotIn("douyin.com/video/900000000000000010", note)
             for source_id in (
                 public_media_demo.AUDIO_ID,
                 public_media_demo.IMAGE_ID,

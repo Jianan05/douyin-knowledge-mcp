@@ -399,7 +399,9 @@ def refresh_batch_quality(root: Path, limit: int = 15) -> dict:
 
 def canonical_url(row: dict) -> str:
     video_id = str(row.get("video_id") or "").strip()
-    old_url = str(row.get("url") or "")
+    old_url = str(row.get("url") or "").strip()
+    if old_url and "douyin.com/" not in old_url.lower():
+        return old_url
     route = "note" if "/note/" in old_url or "图文" in str(row.get("platform") or "") else "video"
     return f"https://www.douyin.com/{route}/{video_id}" if video_id else old_url
 
