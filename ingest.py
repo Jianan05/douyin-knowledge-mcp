@@ -576,8 +576,8 @@ class Library:
             f'transcribed_at: {time.strftime("%Y-%m-%d %H:%M:%S")}',
             "---",
             "",
-            # 正文顶部放一行可点击链接：转写稿只有声音，画面得回原视频看。
-            f"🔗 [在抖音打开原视频]({url})",
+            # 正文顶部放一行可点击来源；平台可能是抖音、Bilibili 或公开夹具。
+            f"🔗 [打开原始来源]({url})",
             "",
             f"> {full_desc}" if full_desc else "",
             "",

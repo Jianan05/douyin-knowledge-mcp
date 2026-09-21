@@ -65,6 +65,24 @@ Whisper 模型大小可用 `--model tiny|base|small|medium|large-v3` 指定；�
 
 命令会在系统临时目录生成原始材料、审阅状态本、确认事件和一条 `notes/` 正式笔记，并输出各文件路径。演示中的人工确认是明确标注的固定测试夹具，不冒充真实用户判断。
 
+要进一步实际运行本地 Whisper、RapidOCR 和纯文字入库，可执行混合媒体演示：
+
+```powershell
+.\runtime\python\python.exe public_media_demo.py --model tiny
+```
+
+该命令使用仓库内可公开分发的 WAV、PNG 和文字夹具，在系统临时目录生成三条可追溯素材、音频时间戳来源包、OCR 结果、人工审阅状态、演示清单和一条确认知识笔记。它不会读取抖音登录状态、Cookie、私人收藏或默认知识库。音频来源和许可证记录在 `examples/public-demo/README.md`。
+
+公开图片夹具及一次真实运行的提取结果如下（OCR 的空格和字母误差会原样保留，供人工审阅）：
+
+![公开混合媒体演示中的 OCR 图片夹具](examples/public-demo/text-card.png)
+
+```text
+ASR: Example.
+OCR: PUBLIC DEMO / EVIDENCEFIRST / REVIEWBEFORE PROMOTION /
+     SOURCE TD: DEMO-IMAGE-001
+```
+
 ### 1. 登录抖音
 
 首次使用或登录过期时，打开本项目专用的持久化 Chromium profile：
