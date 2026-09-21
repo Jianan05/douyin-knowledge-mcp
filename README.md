@@ -73,9 +73,18 @@ Whisper 模型大小可用 `--model tiny|base|small|medium|large-v3` 指定；�
 
 该命令使用仓库内的 25 秒公共领域真人视频、原始片头帧和人工文字，在系统临时目录生成三条可追溯素材、视频转录时间戳来源包、OCR 结果、人工审阅状态、演示清单和一条确认知识笔记。它不会读取抖音登录状态、Cookie、私人收藏或默认知识库。素材来源和许可证记录在 `examples/public-demo/README.md`。
 
-点击下图可观看 83 秒公开演示。成片使用公共领域真人视频、真实本地运行录屏、真人原声、完整中文旁白和字幕，不包含私人素材：
+下面是 12 秒轻量预览；点击可观看 66 秒、1080p 完整版。成片使用公共领域真人视频、真实本地运行录屏、真人原声、完整中文旁白和字幕，不包含私人素材：
 
-[![从真人公开视频到可追溯知识：83 秒真实演示](docs/assets/public-media-demo-poster.png)](docs/assets/public-media-demo.mp4)
+<p align="center">
+  <a href="docs/assets/public-media-demo.mp4">
+    <picture>
+      <source media="(prefers-reduced-motion: reduce)" srcset="docs/assets/public-media-demo-poster.png">
+      <img src="docs/assets/public-media-demo-preview.gif" alt="从真人公开视频到可追溯知识：66 秒真实演示" width="800">
+    </picture>
+  </a>
+  <br>
+  <sub>真实素材 → 本地转录 / OCR → 人工审阅 → confirmed 知识笔记 · 点击观看有声完整版</sub>
+</p>
 
 公开图片夹具及一次真实运行的提取结果如下（OCR 的空格和字母误差会原样保留，供人工审阅）：
 

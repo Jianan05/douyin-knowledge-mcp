@@ -15,7 +15,7 @@ from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 
 PROJECT = Path(__file__).resolve().parents[1]
-WIDTH, HEIGHT = 1280, 720
+WIDTH, HEIGHT = 1920, 1080
 FONT = Path("C:/Windows/Fonts/NotoSansSC-VF.ttf")
 FONT_BOLD = Path("C:/Windows/Fonts/msyhbd.ttc")
 TIME_RE = re.compile(r"(\d{2}):(\d{2}):(\d{2}),(\d{3})")
@@ -45,10 +45,10 @@ def poster(source_frame: Path, output: Path) -> None:
     image = Image.open(source_frame).convert("RGB").resize((WIDTH, HEIGHT))
     overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
-    draw.rectangle((0, 430, WIDTH, HEIGHT), fill=(4, 15, 24, 220))
-    draw.text((70, 470), "真人公开视频 → 可追溯知识", font=font(46, True), fill="#ffffff")
-    draw.text((72, 550), "83 秒真实运行 · 真人原声 · 中文旁白", font=font(27), fill="#48e0bd")
-    draw.text((72, 615), "Douyin Knowledge Ingest", font=font(20, True), fill="#aac0d0")
+    draw.rectangle((0, 645, WIDTH, HEIGHT), fill=(4, 15, 24, 220))
+    draw.text((105, 705), "真人公开视频 → 可追溯知识", font=font(69, True), fill="#ffffff")
+    draw.text((108, 825), "66 秒真实运行 · 真人原声 · 中文旁白", font=font(40), fill="#48e0bd")
+    draw.text((108, 930), "Douyin Knowledge Ingest", font=font(30, True), fill="#aac0d0")
     Image.alpha_composite(image.convert("RGBA"), overlay).convert("RGB").save(output)
 
 
@@ -56,24 +56,47 @@ def result_frame(source_frame: Path, manifest: dict, output: Path) -> None:
     base = Image.open(source_frame).convert("RGB").resize((WIDTH, HEIGHT)).filter(ImageFilter.GaussianBlur(9))
     image = Image.alpha_composite(base.convert("RGBA"), Image.new("RGBA", base.size, (4, 15, 24, 190)))
     draw = ImageDraw.Draw(image)
-    draw.text((70, 58), "真实运行完成", font=font(24, True), fill="#48e0bd")
-    draw.text((70, 104), "原始材料没有自动冒充知识", font=font(42, True), fill="#ffffff")
+    draw.text((105, 87), "真实运行完成", font=font(36, True), fill="#48e0bd")
+    draw.text((105, 156), "原始材料没有自动冒充知识", font=font(63, True), fill="#ffffff")
     conclusion = (
         "真人视频转录、原始片头帧 OCR 和人工文字进入同一套可追溯结构；"
         "只有经过明确审阅的来源，才会提升为 confirmed 知识笔记。"
     )
-    chosen = font(28)
+    chosen = font(42)
     draw.multiline_text(
-        (74, 190), "\n".join(_wrap(draw, conclusion, 1080, chosen)),
-        font=chosen, fill="#eef5f8", spacing=15,
+        (111, 285), "\n".join(_wrap(draw, conclusion, 1620, chosen)),
+        font=chosen, fill="#eef5f8", spacing=22,
     )
-    y = 350
+    y = 525
     for row in manifest["sources"]:
         label = f"{row['kind'].upper():5}  {row['source_id']}  {row['license']}"
-        draw.rounded_rectangle((72, y, 1208, y + 62), radius=13, fill=(16, 43, 61, 235))
-        draw.text((96, y + 16), label, font=font(19), fill="#b9ccda")
-        y += 75
-    draw.text((74, 620), "103 tests passed  ·  private_data_used: false", font=font(22, True), fill="#48e0bd")
+        draw.rounded_rectangle((108, y, 1812, y + 93), radius=20, fill=(16, 43, 61, 235))
+        draw.text((144, y + 24), label, font=font(29), fill="#b9ccda")
+        y += 112
+    draw.text((111, 930), "103 tests passed  ·  private_data_used: false", font=font(33, True), fill="#48e0bd")
+    image.convert("RGB").save(output)
+
+
+def provenance_frame(source_frame: Path, manifest: dict, output: Path) -> None:
+    base = Image.open(source_frame).convert("RGB").resize((WIDTH, HEIGHT)).filter(ImageFilter.GaussianBlur(12))
+    image = Image.alpha_composite(base.convert("RGBA"), Image.new("RGBA", base.size, (4, 15, 24, 215)))
+    draw = ImageDraw.Draw(image)
+    draw.text((105, 85), "TRACEABLE BY DEFAULT", font=font(30, True), fill="#48e0bd")
+    draw.text((105, 145), "来源、许可、哈希和审阅状态一起留下", font=font(58, True), fill="#ffffff")
+    y = 290
+    for row in manifest["sources"]:
+        digest = str(row["sha256"])[:16] + "…"
+        label = f"{row['kind'].upper()}  ·  {row['source_id']}"
+        detail = f"{row['license']}  ·  SHA-256 {digest}"
+        draw.rounded_rectangle((105, y, 1815, y + 150), radius=24, fill=(16, 43, 61, 235))
+        draw.text((145, y + 24), label, font=font(32, True), fill="#eef5f8")
+        draw.text((145, y + 82), detail, font=font(26), fill="#9fb6c6")
+        y += 175
+    draw.text(
+        (108, 905),
+        "index.jsonl  ·  _source_packages/  ·  _审阅状态.jsonl  ·  notes/",
+        font=font(27), fill="#48e0bd",
+    )
     image.convert("RGB").save(output)
 
 
@@ -123,31 +146,44 @@ def render(
         )
         poster_path = output.with_name(output.stem + "-poster.png")
         poster(source_frame, poster_path)
+        provenance = temp_dir / "provenance.png"
+        provenance_frame(source_frame, manifest, provenance)
         final_frame = temp_dir / "result.png"
         result_frame(source_frame, manifest, final_frame)
-        shift_subtitles(subtitles, temp_dir / "shifted.srt", 10)
+        shift_subtitles(subtitles, temp_dir / "shifted.srt", 7)
 
         video_filter = (
-            "[0:v]trim=4.5:14.5,setpts=PTS-STARTPTS,scale=1280:720,format=yuv420p[intro];"
-            "[1:v]trim=0:48,setpts=PTS-STARTPTS,crop=1160:680:0:0,"
-            "scale=1228:720,pad=1280:720:26:0:#07131f,format=yuv420p[run];"
-            "[0:v]trim=14.5:25,setpts=PTS-STARTPTS,scale=1280:720,format=yuv420p[source];"
-            "[3:v]trim=duration=15,setpts=PTS-STARTPTS,scale=1280:720,format=yuv420p[result];"
-            "[intro][run][source][result]concat=n=4:v=1:a=0[sequence];"
-            "[sequence]subtitles=shifted.srt:force_style='FontName=Microsoft YaHei,FontSize=18,"
+            "[0:v]trim=4.5:11.5,setpts=PTS-STARTPTS,scale=1920:1080,format=yuv420p[intro];"
+            "[3:v]trim=duration=3,setpts=PTS-STARTPTS,scale=1920:1080,format=yuv420p[title];"
+            "[1:v]trim=0:4,setpts=PTS-STARTPTS,crop=1160:680:0:0,"
+            "scale=1842:1080,pad=1920:1080:39:0:#07131f,format=yuv420p[runstart];"
+            "[1:v]trim=4:34,setpts=(PTS-STARTPTS)/6,crop=1160:680:0:0,"
+            "scale=1842:1080,pad=1920:1080:39:0:#07131f,format=yuv420p[runfast];"
+            "[1:v]trim=34:47,setpts=PTS-STARTPTS,crop=1160:680:0:0,"
+            "scale=1842:1080,pad=1920:1080:39:0:#07131f,format=yuv420p[runresult];"
+            "[0:v]trim=11.5:19.5,setpts=PTS-STARTPTS,scale=1920:1080,format=yuv420p[source];"
+            "[4:v]trim=duration=11,setpts=PTS-STARTPTS,scale=1920:1080,format=yuv420p[trace];"
+            "[5:v]trim=duration=15,setpts=PTS-STARTPTS,scale=1920:1080,format=yuv420p[result];"
+            "[intro][title][runstart][runfast][runresult][source][trace][result]"
+            "concat=n=8:v=1:a=0[sequence];"
+            "[sequence]subtitles=shifted.srt:force_style='FontName=Microsoft YaHei,FontSize=24,"
             "PrimaryColour=&H00FFFFFF,BackColour=&H90000000,BorderStyle=3,Outline=1,"
-            "Shadow=0,MarginV=26,Alignment=2'[video];"
-            "[0:a]atrim=4.5:14.5,asetpts=PTS-STARTPTS,loudnorm=I=-16:TP=-1.5:LRA=11[original];"
-            "[2:a]loudnorm=I=-16:TP=-1.5:LRA=11,adelay=10000:all=1,apad=whole_dur=83.5[voice];"
-            "[original]apad=whole_dur=83.5[originalpad];"
+            "Shadow=0,MarginV=40,Alignment=2'[video];"
+            "[0:a]atrim=4.5:11.5,asetpts=PTS-STARTPTS,loudnorm=I=-16:TP=-1.5:LRA=11[original];"
+            "[2:a]loudnorm=I=-16:TP=-1.5:LRA=11,adelay=7000:all=1,apad=whole_dur=66[voice];"
+            "[original]apad=whole_dur=66[originalpad];"
             "[originalpad][voice]amix=inputs=2:duration=longest:dropout_transition=0:normalize=0[audio]"
         )
         command = [
             ffmpeg, "-y", "-i", str(source_video), "-i", str(terminal_capture),
-            "-i", str(narration), "-loop", "1", "-t", "15", "-i", str(final_frame),
+            "-i", str(narration),
+            "-loop", "1", "-t", "3", "-i", str(poster_path),
+            "-loop", "1", "-t", "11", "-i", str(provenance),
+            "-loop", "1", "-t", "15", "-i", str(final_frame),
             "-filter_complex", video_filter, "-map", "[video]", "-map", "[audio]",
-            "-r", "30", "-c:v", "libx264", "-preset", "medium", "-crf", "20",
-            "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", "-t", "83.5",
+            "-r", "30", "-c:v", "libx264", "-preset", "medium", "-crf", "18",
+            "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
+            "-movflags", "+faststart", "-t", "66",
             str(output),
         ]
         subprocess.run(command, cwd=temp_dir, check=True)
