@@ -16,7 +16,7 @@ import server
 
 class FakeTranscript(str):
     def __new__(cls):
-        value = str.__new__(cls, "Example.")
+        value = str.__new__(cls, "Hello, and happy 4th of July everybody.")
         value.asr = {
             "model": "tiny",
             "language": "en",
@@ -27,8 +27,8 @@ class FakeTranscript(str):
             "segment_id": 0,
             "start": 0.0,
             "end": 0.88,
-            "raw_text": "Example.",
-            "cleaned_text": "Example.",
+            "raw_text": "Hello, and happy 4th of July everybody.",
+            "cleaned_text": "Hello, and happy 4th of July everybody.",
             "cleaning": [],
         }]
         return value
@@ -60,17 +60,19 @@ class PublicMediaDemoTests(unittest.TestCase):
             self.assertFalse(manifest["private_data_used"])
             self.assertEqual(
                 {row["kind"] for row in manifest["sources"]},
-                {"audio", "image", "text"},
+                {"video", "image", "text"},
             )
-            self.assertEqual(manifest["sources"][0]["license"], "CC0-1.0")
+            self.assertEqual(
+                manifest["sources"][0]["license"],
+                "Public-Domain-Mark-1.0",
+            )
             self.assertTrue(Path(manifest["sources"][0]["source_package"]).is_file())
             note = Path(result["knowledge_note"]).read_text(encoding="utf-8")
             self.assertIn('knowledge_status: "confirmed"', note)
-            self.assertIn(public_media_demo.AUDIO_SOURCE, note)
-            self.assertIn("fixture://public-demo/text-card.png", note)
+            self.assertIn(public_media_demo.VIDEO_SOURCE, note)
             self.assertNotIn("douyin.com/video/900000000000000010", note)
             for source_id in (
-                public_media_demo.AUDIO_ID,
+                public_media_demo.VIDEO_ID,
                 public_media_demo.IMAGE_ID,
                 public_media_demo.TEXT_ID,
             ):

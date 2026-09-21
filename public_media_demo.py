@@ -9,6 +9,7 @@ import shutil
 import sys
 import tempfile
 from pathlib import Path
+from typing import Callable
 
 PROJECT_DIR = Path(__file__).resolve().parent
 if str(PROJECT_DIR) not in sys.path:
@@ -21,10 +22,10 @@ import review_book
 
 
 ASSET_DIR = PROJECT_DIR / "examples" / "public-demo"
-AUDIO_ID = "9000000000000000101"
+VIDEO_ID = "9000000000000000101"
 IMAGE_ID = "9000000000000000102"
 TEXT_ID = "9000000000000000103"
-AUDIO_SOURCE = "https://commons.wikimedia.org/wiki/File:The_English_word_EXAMPLE.wav"
+VIDEO_SOURCE = "https://commons.wikimedia.org/wiki/File:2009-07-04_President_Obama%27s_Weekly_Address.ogv"
 
 
 def _sha256(path: Path) -> str:
@@ -76,11 +77,16 @@ def _record_item(
     return note
 
 
-def create_demo(root: Path, model: str = "tiny") -> dict:
+def create_demo(
+    root: Path,
+    model: str = "tiny",
+    progress: Callable[[str], None] | None = None,
+) -> dict:
+    report = progress or (lambda _message: None)
     root = root.resolve()
     if root.exists() and any(root.iterdir()):
         raise ValueError(f"演示目录必须为空，拒绝覆盖：{root}")
-    required = ("speech.wav", "text-card.png", "text-post.txt")
+    required = ("source-clip.mp4", "title-card.png", "text-post.txt")
     for name in required:
         if not (ASSET_DIR / name).is_file():
             raise FileNotFoundError(f"缺少公开演示夹具 examples/public-demo/{name}")
@@ -96,46 +102,48 @@ def create_demo(root: Path, model: str = "tiny") -> dict:
     # Lazy import keeps --help and unit tests free from Whisper model loading.
     import server
 
-    audio_transcript = server._transcribe_segments_sync(
-        str(copied["speech.wav"]), model
+    report("[1/4] 本地 Whisper 转录 25 秒真人公开视频……")
+    video_transcript = server._transcribe_segments_sync(
+        str(copied["source-clip.mp4"]), model
     )
-    audio_meta = {
-        "video_id": AUDIO_ID,
-        "title": "CC0 public audio fixture",
-        "url": AUDIO_SOURCE,
-        "platform": "public-demo-audio",
-        "tags": ["public-demo", "audio", "CC0"],
-        "duration": float(audio_transcript.asr.get("duration") or 0),
+    video_meta = {
+        "video_id": VIDEO_ID,
+        "title": "President Obama's Weekly Address — July 4, 2009",
+        "url": VIDEO_SOURCE,
+        "platform": "public-demo-video",
+        "tags": ["public-demo", "video", "public-domain"],
+        "duration": float(video_transcript.asr.get("duration") or 0),
     }
-    source_package = lib.write_source_package(audio_meta, audio_transcript)
-    audio_note = _record_item(
+    source_package = lib.write_source_package(video_meta, video_transcript)
+    video_note = _record_item(
         lib,
-        video_id=AUDIO_ID,
-        title=audio_meta["title"],
-        source=AUDIO_SOURCE,
-        kind="audio",
-        transcript=audio_transcript,
+        video_id=VIDEO_ID,
+        title=video_meta["title"],
+        source=VIDEO_SOURCE,
+        kind="video",
+        transcript=video_transcript,
         model=model,
-        device=str(audio_transcript.asr.get("device") or "auto"),
-        asset_path=copied["speech.wav"],
-        duration=audio_meta["duration"],
+        device=str(video_transcript.asr.get("device") or "auto"),
+        asset_path=copied["source-clip.mp4"],
+        duration=video_meta["duration"],
         source_package=source_package,
     )
 
-    ocr_text = image_note.ocr_bytes(copied["text-card.png"].read_bytes())
+    report("[2/4] RapidOCR 读取视频原始片头帧……")
+    ocr_text = image_note.ocr_bytes(copied["title-card.png"].read_bytes())
     if not ocr_text.strip():
         raise RuntimeError("公开图片夹具未识别出任何文字")
     image_transcript = "### 图 1\n\n" + ocr_text.strip()
     image_note_path = _record_item(
         lib,
         video_id=IMAGE_ID,
-        title="Generated public OCR fixture",
-        source="fixture://public-demo/text-card.png",
+        title="Weekly Address title card",
+        source=VIDEO_SOURCE,
         kind="image",
         transcript=image_transcript,
         model="rapidocr",
         device="CPU",
-        asset_path=copied["text-card.png"],
+        asset_path=copied["title-card.png"],
     )
 
     text_body = copied["text-post.txt"].read_text(encoding="utf-8").strip()
@@ -151,8 +159,9 @@ def create_demo(root: Path, model: str = "tiny") -> dict:
         asset_path=copied["text-post.txt"],
     )
 
+    report("[3/4] 写入来源、索引和人工审阅状态……")
     review_book.prepare_batch(root, limit=3)
-    for source_id in (AUDIO_ID, IMAGE_ID, TEXT_ID):
+    for source_id in (VIDEO_ID, IMAGE_ID, TEXT_ID):
         review_book.set_status(
             root,
             source_id,
@@ -163,12 +172,12 @@ def create_demo(root: Path, model: str = "tiny") -> dict:
         root,
         title="混合媒体进入长期知识前必须保留证据与审阅状态",
         conclusion=(
-            "音频转录、图片 OCR 和纯文字都可以进入同一套可追溯素材结构；"
+            "真人视频转录、原始片头帧 OCR 和人工文字都可以进入同一套可追溯素材结构；"
             "自动提取结果仍须经过人工审阅，才能提升为长期知识。"
         ),
-        source_ids=[AUDIO_ID, IMAGE_ID, TEXT_ID],
+        source_ids=[VIDEO_ID, IMAGE_ID, TEXT_ID],
         rationale=(
-            "公开演示实际运行本地 Whisper、RapidOCR 和直接文字入库，"
+            "公开演示实际运行真人视频的本地 Whisper、原始片头帧 RapidOCR 和直接文字入库，"
             "并通过相同审阅门槛生成确认笔记。"
         ),
         scope="仅验证本项目公开演示链路，不评价第三方内容或模型准确率。",
@@ -183,21 +192,21 @@ def create_demo(root: Path, model: str = "tiny") -> dict:
         "model": model,
         "sources": [
             {
-                "source_id": AUDIO_ID,
-                "kind": "audio",
-                "origin": AUDIO_SOURCE,
-                "license": "CC0-1.0",
-                "sha256": _sha256(copied["speech.wav"]),
-                "extracted_text": str(audio_transcript),
-                "note": str(audio_note),
+                "source_id": VIDEO_ID,
+                "kind": "video",
+                "origin": VIDEO_SOURCE,
+                "license": "Public-Domain-Mark-1.0",
+                "sha256": _sha256(copied["source-clip.mp4"]),
+                "extracted_text": str(video_transcript),
+                "note": str(video_note),
                 "source_package": str(source_package or ""),
             },
             {
                 "source_id": IMAGE_ID,
                 "kind": "image",
-                "origin": "project-generated fixture",
-                "license": "MIT",
-                "sha256": _sha256(copied["text-card.png"]),
+                "origin": "frame from public-domain source video",
+                "license": "Public-Domain-Mark-1.0",
+                "sha256": _sha256(copied["title-card.png"]),
                 "extracted_text": ocr_text,
                 "note": str(image_note_path),
             },
@@ -218,24 +227,39 @@ def create_demo(root: Path, model: str = "tiny") -> dict:
         json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
+    report("[4/4] 生成确认知识笔记和公开演示清单。")
     return {
         "root": str(root),
         "manifest": str(manifest_path),
         "knowledge_note": str(knowledge_note),
-        "audio_text": str(audio_transcript),
+        "video_text": str(video_transcript),
         "ocr_text": ocr_text,
     }
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="运行不含私人数据的真实音频、图片 OCR 与文字知识闭环"
+        description="运行不含私人数据的真人视频、图片 OCR 与文字知识闭环"
     )
     parser.add_argument("--output", type=Path, help="空目录；省略时使用系统临时目录")
     parser.add_argument("--model", default="tiny", help="Whisper 模型，默认 tiny")
+    parser.add_argument(
+        "--brief",
+        action="store_true",
+        help="只打印适合公开录屏的结果摘要，不显示本机绝对路径",
+    )
     args = parser.parse_args()
     output = args.output or Path(tempfile.mkdtemp(prefix="douyin-public-media-demo-"))
-    print(json.dumps(create_demo(output, args.model), ensure_ascii=False, indent=2))
+    result = create_demo(output, args.model, progress=lambda text: print(text, flush=True))
+    if args.brief:
+        print("\nASR 结果：")
+        print(result["video_text"])
+        print("\nOCR 结果：")
+        print(result["ocr_text"])
+        print("\n完成：3 条来源 → 人工审阅 → 1 条 confirmed 知识笔记")
+        print("所有输出已写入临时演示库；未读取 Cookie 或私人收藏。")
+    else:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 
 

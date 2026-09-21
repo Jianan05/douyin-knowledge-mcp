@@ -71,20 +71,20 @@ Whisper 模型大小可用 `--model tiny|base|small|medium|large-v3` 指定；�
 .\runtime\python\python.exe public_media_demo.py --model tiny
 ```
 
-该命令使用仓库内可公开分发的 WAV、PNG 和文字夹具，在系统临时目录生成三条可追溯素材、音频时间戳来源包、OCR 结果、人工审阅状态、演示清单和一条确认知识笔记。它不会读取抖音登录状态、Cookie、私人收藏或默认知识库。音频来源和许可证记录在 `examples/public-demo/README.md`。
+该命令使用仓库内的 25 秒公共领域真人视频、原始片头帧和人工文字，在系统临时目录生成三条可追溯素材、视频转录时间戳来源包、OCR 结果、人工审阅状态、演示清单和一条确认知识笔记。它不会读取抖音登录状态、Cookie、私人收藏或默认知识库。素材来源和许可证记录在 `examples/public-demo/README.md`。
 
-点击下图可观看 72 秒公开演示。视频根据一次真实本地运行的产物渲染，第四幕会播放用于 ASR 的原始 CC0 音频：
+点击下图可观看 83 秒公开演示。成片使用公共领域真人视频、真实本地运行录屏、真人原声、完整中文旁白和字幕，不包含私人素材：
 
-[![从混合素材到可追溯知识：72 秒公开演示](docs/assets/public-media-demo-poster.png)](docs/assets/public-media-demo.mp4)
+[![从真人公开视频到可追溯知识：83 秒真实演示](docs/assets/public-media-demo-poster.png)](docs/assets/public-media-demo.mp4)
 
 公开图片夹具及一次真实运行的提取结果如下（OCR 的空格和字母误差会原样保留，供人工审阅）：
 
-![公开混合媒体演示中的 OCR 图片夹具](examples/public-demo/text-card.png)
+![公共领域真人视频的原始片头帧](examples/public-demo/title-card.png)
 
 ```text
-ASR: Example.
-OCR: PUBLIC DEMO / EVIDENCEFIRST / REVIEWBEFORE PROMOTION /
-     SOURCE TD: DEMO-IMAGE-001
+ASR: Hello, and happy 4th of July everybody. This weekend is a time to
+     get together with family and friends, kick back, and enjoy a little time off…
+OCR: YOURWEEKLYADDRESS / JULY4,2009
 ```
 
 ### 1. 登录抖音
