@@ -1,0 +1,53 @@
+{
+  "fixture_version": "1.0.0",
+  "source": {
+    "platform": "douyin",
+    "source_id": "synthetic-pending",
+    "url": "https://fixture.invalid/synthetic-pending",
+    "title": "人工合成 pending",
+    "tags": [
+      "synthetic"
+    ],
+    "duration_seconds": "2.2"
+  },
+  "transcript": {
+    "text": "每天保持合理的热量缺口，并配合力量训练，是健康减脂的基本方法。",
+    "segments": [
+      {
+        "start_seconds": "0",
+        "end_seconds": "2.2",
+        "raw_text": "每天保持合理的热量缺口，并配合力量训练，是健康减脂的基本方法。",
+        "cleaned_text": "每天保持合理的热量缺口，并配合力量训练，是健康减脂的基本方法。",
+        "cleaning": [],
+        "avg_logprob": "-0.125",
+        "no_speech_prob": "0.02",
+        "compression_ratio": "1.1",
+        "temperature": "0"
+      }
+    ],
+    "asr": {
+      "model": "tiny",
+      "language": "zh",
+      "vad_filter": true,
+      "device": "cpu",
+      "compute_type": "int8",
+      "initial_prompt_enabled": true,
+      "initial_prompt_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "condition_on_previous_text": false,
+      "beam_size": 5,
+      "vad_threshold": "0.3",
+      "min_silence_duration_ms": 800,
+      "language_probability": "0.99",
+      "detected_duration_seconds": "2.2"
+    }
+  },
+  "ocr": {
+    "screen_ocr": "",
+    "screen_candidates": [
+      {
+        "text": "ProjectName",
+        "frame_count": 2
+      }
+    ]
+  }
+}
