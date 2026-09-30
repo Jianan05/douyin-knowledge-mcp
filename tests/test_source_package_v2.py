@@ -655,7 +655,7 @@ def test_stdio_fixture_process_round_trip(tmp_path: Path) -> None:
     output_root = tmp_path / "library"
     _write_fixture(fixture_root)
 
-    async def exercise() -> tuple[list[str], dict, dict, str]:
+    async def exercise() -> tuple[list[str], dict, dict, list[dict], str]:
         env = os.environ.copy()
         env["DOUYIN_SOURCE_PACKAGE_ROOT"] = str(output_root)
         params = StdioServerParameters(
@@ -674,6 +674,17 @@ def test_stdio_fixture_process_round_trip(tmp_path: Path) -> None:
                 async with ClientSession(read, write) as session:
                     await session.initialize()
                     tools = await session.list_tools()
+                    failures = []
+                    for name, arguments, expected_code in (
+                        ("get_source_package_status", {"protocol_version": "1.0.0", "job_id": "missing"}, "JOB_NOT_FOUND"),
+                        ("get_source_package_status", {"protocol_version": "0.9.0", "job_id": "missing"}, "UNSUPPORTED_PROTOCOL_VERSION"),
+                        ("create_source_package", {"protocol_version": "1.0.0", "url": "https://fixture.invalid/synthetic-video-001", "model_size": "invalid"}, "INVALID_ARGUMENT"),
+                    ):
+                        failure = await session.call_tool(name, arguments)
+                        assert failure.isError is True
+                        assert failure.structuredContent["ok"] is False
+                        assert failure.structuredContent["error"]["code"] == expected_code
+                        failures.append(failure.structuredContent)
                     created = await session.call_tool(
                         "create_source_package",
                         {
@@ -708,13 +719,14 @@ def test_stdio_fixture_process_round_trip(tmp_path: Path) -> None:
             errlog.seek(0)
             stderr = errlog.read()
         assert completed is not None
-        return [tool.name for tool in tools.tools], completed, rejected.structuredContent, stderr
+        return [tool.name for tool in tools.tools], completed, rejected.structuredContent, failures, stderr
 
-    names, completed, rejected, stderr = asyncio.run(exercise())
+    names, completed, rejected, failures, stderr = asyncio.run(exercise())
     assert "create_source_package" in names
     assert "get_source_package_status" in names
     assert completed["data"]["status"] == "succeeded"
     assert rejected["error"]["code"] == "INVALID_ARGUMENT"
+    assert len(failures) == 3
     assert "[test mode] fixture backend enabled" in stderr
     assert "Traceback" not in stderr
     assert len(list((output_root / "_source_packages").glob("*.json"))) == 1
