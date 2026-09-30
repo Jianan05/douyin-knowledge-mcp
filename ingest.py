@@ -55,6 +55,10 @@ if _LOCAL_HF.is_dir():
     os.environ.setdefault("HF_HOME", str(_LOCAL_HF))
 
 import server
+from source_package import (
+    build_protected_fields as build_source_package_v2,
+    write_source_package_v2 as publish_source_package_v2,
+)
 
 # 默认库位置。频繁写入的库建议使用本地非同步目录，避免产生冲突副本。
 DEFAULT_ROOT = Path.home() / "Desktop" / "DouyinNotes"
@@ -628,6 +632,31 @@ class Library:
         )
         tmp.replace(path)
         return path
+
+    def write_source_package_v2(
+        self,
+        source: dict,
+        transcript: str,
+        *,
+        screen_ocr: str = "",
+        screen_candidates: list | None = None,
+        ocr_policy: str,
+    ) -> dict:
+        """显式 opt-in 写入 T19 v2 包；不改变旧 v1 writer。"""
+
+        protected, projection_sha256 = build_source_package_v2(
+            source=source,
+            segments=list(getattr(transcript, "segments", [])),
+            asr=dict(getattr(transcript, "asr", {})),
+            screen_ocr=screen_ocr,
+            screen_candidates=screen_candidates or [],
+            ocr_policy=ocr_policy,
+        )
+        return publish_source_package_v2(
+            self.root,
+            protected,
+            projection_sha256,
+        )
 
 
 class TranscriptionProgress:
@@ -1307,8 +1336,7 @@ def _looks_empty(transcript: str, duration: float) -> bool:
     判据是全库 QC 扫出来的：每秒不到 1.5 字，或绝对字数 < 20。
     典型场景：一张照片发成视频、纯演示无人声、纯 BGM 配字幕。
     """
-    chars = len(transcript.replace("\n", "").replace(" ", ""))
-    return chars < 20 or (duration > 20 and chars < duration * 1.5)
+    return server._looks_empty(transcript, duration)
 
 
 def _has_effective_image_ocr(text: str) -> bool:
@@ -1324,17 +1352,7 @@ async def read_screen_text(
     download_lock: asyncio.Lock | None = None,
 ) -> tuple[str, list]:
     """抽帧 OCR 兜底。返回 (画面文字, 英文候选名)。"""
-    import frames
-
-    with tempfile.TemporaryDirectory(prefix="frames_") as tmp:
-        # ⚠️ 必须 need="video"：转写那条路下的是纯音频，一帧也抽不出来
-        if download_lock is None:
-            path = await server._download_douyin_media(url, tmp, need="video")
-        else:
-            async with download_lock:
-                path = await server._download_douyin_media(url, tmp, need="video")
-        screen, words = await asyncio.to_thread(frames.read_screen, path)
-        return screen, frames.candidates(words, transcript)
+    return await server._read_screen_text(url, transcript, download_lock)
 
 
 async def ingest_image_post(
