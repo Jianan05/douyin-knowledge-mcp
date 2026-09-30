@@ -363,6 +363,12 @@ class StrictFastMCP(FastMCP):
         if not self._arguments_are_valid(tool.inputSchema, arguments):
             return failure_result("INVALID_ARGUMENT")
         try:
+            if name in {"create_source_package", "get_source_package_status"}:
+                # 两个交接工具自行返回已验证的成功或失败信封；SDK 的成功
+                # 模型转换会错误拒绝合法失败分支。旧工具仍用原有转换。
+                return await self._tool_manager.call_tool(
+                    name, arguments, context=None, convert_result=False
+                )
             return await super().call_tool(name, arguments)
         except Exception:
             return failure_result("INTERNAL_ERROR")
